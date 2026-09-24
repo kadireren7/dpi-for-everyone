@@ -49,6 +49,7 @@ PACKET_SRC = \
 	src/discovery/cache.c \
 	src/dns/dns.c \
 	src/dns/dns_udp.c \
+	src/compat.c \
 	src/transparent/policy.c
 
 PACKET_OBJ = $(PACKET_SRC:.c=.o)
@@ -65,11 +66,14 @@ TEST_BIN = $(TEST_SRC:.c=)
 TP_SRC = \
 	src/transparent/transparent.c \
 	src/transparent/conn.c \
+	src/transparent/net.c \
 	src/transparent/verify.c \
-	src/transparent/nft.c \
 	src/transparent/policy.c \
 	src/transparent/quic.c \
 	src/transparent/dnsfwd.c \
+	src/transparent/platform_linux.c \
+	src/tlsclient.c \
+	src/compat.c \
 	src/dns/dns.c \
 	src/dns/dns_udp.c \
 	src/dns/dns_doh.c \
@@ -88,6 +92,7 @@ ifeq ($(shell uname -s),Linux)
 PROXY_SRC = $(SRC) $(TP_SRC)
 LDFLAGS += $(OPENSSL_LIBS)
 INCLUDES += $(OPENSSL_CFLAGS)
+CFLAGS += -DHAVE_TRANSPARENT
 else
 PROXY_SRC = $(SRC)
 endif
@@ -169,6 +174,7 @@ packet-mode:
 
 clean:
 	rm -f $(wildcard src/*.d src/*/*.d)
+	rm -f tests/unit/*.exe $(WIN_TEST_OBJ)
 	rm -f $(OBJ) $(SRC:.c=.o) $(TP_SRC:.c=.o) $(WIN_OBJ) $(PACKET_OBJ) $(TEST_BIN) \
 		src/nfqueue/nfqueue_engine.o src/main_packet.o \
 		src/discovery/probe_runner.o
@@ -184,16 +190,65 @@ install: $(NAME)
 uninstall:
 	rm -f $(HOME)/.local/bin/$(NAME)
 
-# Cross-compile for Windows via MinGW-w64. Requires the
-# x86_64-w64-mingw32-gcc toolchain (e.g. `apt install mingw-w64`).
+# Windows via MinGW-w64 (MSYS2 MINGW64, or a Linux cross compiler):
+# SOCKS5 proxy plus transparent mode (WinDivert). Needs
+#   - OpenSSL for MinGW (MSYS2: mingw-w64-x86_64-openssl); set
+#     OPENSSL_WIN_PREFIX to its prefix (the directory with include/ and
+#     lib/) if it isn't the compiler's default search path;
+#   - the WinDivert 2.2 SDK, unpacked at WINDIVERT_DIR (scripts/windows/
+#     fetch-windivert.sh downloads and SHA-256-checks the official zip).
+# The result links OpenSSL and winpthreads statically; at run time it
+# needs only WinDivert.dll + WinDivert64.sys next to it.
 CC_WIN = x86_64-w64-mingw32-gcc
-LDFLAGS_WIN = -lws2_32 -lpthread -static
-WIN_OBJ = $(SRC:.c=.win.o)
+WINDIVERT_DIR ?= third_party/WinDivert-2.2.2-A
+OPENSSL_WIN_PREFIX ?=
+WIN_TP_SRC = \
+	src/transparent/transparent.c \
+	src/transparent/conn.c \
+	src/transparent/net.c \
+	src/transparent/verify.c \
+	src/transparent/policy.c \
+	src/transparent/quic.c \
+	src/transparent/dnsfwd.c \
+	src/transparent/platform_windows.c \
+	src/transparent/svc_windows.c \
+	src/tlsclient.c \
+	src/compat.c \
+	src/dns/dns.c \
+	src/dns/dns_udp.c \
+	src/dns/dns_doh.c \
+	src/strategy/strategy.c \
+	src/tls/sni_extract.c \
+	src/discovery/ladder.c
+WIN_CFLAGS = $(CFLAGS) -DHAVE_TRANSPARENT -D_WIN32_WINNT=0x0A00 \
+	-D__USE_MINGW_ANSI_STDIO=1 \
+	-I$(WINDIVERT_DIR)/include \
+	$(if $(OPENSSL_WIN_PREFIX),-I$(OPENSSL_WIN_PREFIX)/include)
+LDFLAGS_WIN = $(if $(OPENSSL_WIN_PREFIX),-L$(OPENSSL_WIN_PREFIX)/lib) \
+	-Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+	$(WINDIVERT_DIR)/x64/WinDivert.lib \
+	-lws2_32 -liphlpapi -lcrypt32 -lbcrypt -ladvapi32 -luser32 \
+	-static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic
+WIN_OBJ = $(SRC:.c=.win.o) $(WIN_TP_SRC:.c=.win.o)
 
 %.win.o: %.c
-	$(CC_WIN) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(CC_WIN) $(WIN_CFLAGS) $(INCLUDES) -c $< -o $@
 
 windows: $(WIN_OBJ)
-	$(CC_WIN) $(CFLAGS) $(WIN_OBJ) $(LDFLAGS_WIN) -o $(NAME).exe
+	$(CC_WIN) $(WIN_CFLAGS) $(WIN_OBJ) $(LDFLAGS_WIN) -o $(NAME).exe
 
-.PHONY: all clean fclean re install uninstall windows test sanitize packet-mode
+# Pure unit tests built for Windows (run them with wine, or on
+# Windows): the shared decision/DNS/TLS-parsing core.
+WIN_TESTS = test_dns test_transparent test_tls test_tls_record test_strategy
+WIN_TEST_OBJ = src/dns/dns.win.o src/dns/dns_udp.win.o src/compat.win.o \
+	src/transparent/policy.win.o src/strategy/strategy.win.o \
+	src/tls/sni_extract.win.o src/tls.win.o src/platform.win.o
+windows-tests: $(WIN_TEST_OBJ)
+	@for t in $(WIN_TESTS); do \
+		$(CC_WIN) $(WIN_CFLAGS) $(INCLUDES) tests/unit/$$t.c \
+			$(WIN_TEST_OBJ) -lws2_32 -static -o tests/unit/$$t.exe \
+			|| exit 1; \
+	done
+
+.PHONY: all clean fclean re install uninstall windows windows-tests test \
+	sanitize packet-mode

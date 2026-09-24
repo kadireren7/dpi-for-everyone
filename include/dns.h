@@ -174,7 +174,7 @@ size_t			dns_truncated_reply(const uint8_t *query, size_t qlen,
 size_t			dns_servfail_reply(const uint8_t *query, size_t qlen,
 					uint8_t *out, size_t out_size);
 
-/* ---- real UDP transport (src/dns/dns_udp.c, POSIX only) ---- */
+/* ---- real UDP transport (src/dns/dns_udp.c) ---- */
 
 # define DNS_DEFAULT_SERVERS "1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4,9.9.9.9"
 
@@ -192,6 +192,15 @@ typedef struct s_dns_udp_servers
  * Invalid entries are skipped. Returns the number of servers parsed. */
 size_t			dns_udp_servers_parse(t_dns_udp_servers *s, const char *list,
 					int so_mark);
+
+/* Called on every socket the UDP and DoH transports open, before
+ * connect (transparent mode: tpp_prepare_socket, so the daemon's own
+ * DNS traffic is never intercepted). Without a hook, a non-zero
+ * so_mark is applied as SO_MARK (Linux). Returns 0, or -1 to abandon
+ * the socket. */
+typedef int		(*t_dns_socket_hook)(int fd, int family);
+void			dns_set_socket_hook(t_dns_socket_hook hook);
+int				dns_prepare_socket(int fd, int family, int so_mark);
 
 /* t_dns_transport over a connected UDP socket per query; userdata is
  * a t_dns_udp_servers. */

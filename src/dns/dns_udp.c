@@ -1,17 +1,31 @@
-#ifndef _WIN32
+#include "dns.h"
+#include "compat.h"
 
-# include "dns.h"
+#include <string.h>
 
-# include <arpa/inet.h>
-# include <netinet/in.h>
-# include <poll.h>
-# include <string.h>
-# include <sys/socket.h>
-# include <unistd.h>
+#ifndef SO_MARK
+# define SO_MARK 36
+#endif
 
-# ifndef SO_MARK
-#  define SO_MARK 36
-# endif
+static t_dns_socket_hook	g_hook;
+
+void	dns_set_socket_hook(t_dns_socket_hook hook)
+{
+	g_hook = hook;
+}
+
+int	dns_prepare_socket(int fd, int family, int so_mark)
+{
+	if (g_hook != NULL)
+		return (g_hook(fd, family));
+#ifdef __linux__
+	if (so_mark != 0)
+		setsockopt(fd, SOL_SOCKET, SO_MARK, &so_mark, sizeof(so_mark));
+#else
+	(void)so_mark;
+#endif
+	return (0);
+}
 
 static int	parse_one(const char *text, struct sockaddr_storage *ss,
 	unsigned int *len)
@@ -72,7 +86,6 @@ long	dns_udp_transport(size_t server_index, const uint8_t *query,
 {
 	t_dns_udp_servers		*s;
 	struct sockaddr_storage	*ss;
-	struct pollfd			pfd;
 	ssize_t					n;
 	int						fd;
 
@@ -80,28 +93,23 @@ long	dns_udp_transport(size_t server_index, const uint8_t *query,
 	if (server_index >= s->count)
 		return (-1);
 	ss = (struct sockaddr_storage *)s->addrs[server_index];
-	fd = socket(ss->ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	fd = (int)socket(ss->ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
-	if (s->so_mark != 0)
-		setsockopt(fd, SOL_SOCKET, SO_MARK, &s->so_mark, sizeof(s->so_mark));
 	/* connect(): the kernel then drops datagrams from any other
 	 * source, so only the queried server can answer. */
-	if (connect(fd, (struct sockaddr *)ss, s->addr_lens[server_index]) < 0
-		|| send(fd, query, query_len, 0) != (ssize_t)query_len)
+	if (dns_prepare_socket(fd, ss->ss_family, s->so_mark) != 0
+		|| connect(fd, (struct sockaddr *)ss, s->addr_lens[server_index]) < 0
+		|| compat_send(fd, query, query_len) != (ssize_t)query_len)
 	{
-		close(fd);
+		compat_close(fd);
 		return (-1);
 	}
-	pfd.fd = fd;
-	pfd.events = POLLIN;
 	n = 0;
-	if (poll(&pfd, 1, timeout_ms) == 1)
-		n = recv(fd, reply, reply_size, 0);
-	close(fd);
+	if (compat_wait(fd, POLLIN, timeout_ms) == 1)
+		n = compat_recv(fd, reply, reply_size);
+	compat_close(fd);
 	if (n < 0)
 		return (-1);
 	return ((long)n);
 }
-
-#endif

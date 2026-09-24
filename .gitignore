@@ -11,3 +11,5 @@ compile_commands.json
 .idea/
 strategy.conf
 discovery-cache.conf
+third_party/
+*.exe

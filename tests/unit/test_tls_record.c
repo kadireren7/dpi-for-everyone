@@ -8,6 +8,24 @@
 /* Minimal ClientHello: record header, handshake header, version,
  * random, empty session id, one cipher, null compression, and one SNI
  * extension for `host`. */
+/* memmem() is a GNU extension; the tests also build for Windows */
+static const void	*find_bytes(const void *hay, size_t hay_len,
+	const void *needle, size_t needle_len)
+{
+	const unsigned char	*h;
+	size_t				i;
+
+	h = hay;
+	i = 0;
+	while (needle_len <= hay_len && i + needle_len <= hay_len)
+	{
+		if (memcmp(h + i, needle, needle_len) == 0)
+			return (h + i);
+		i++;
+	}
+	return (NULL);
+}
+
 static size_t	build_client_hello(unsigned char *buf, const char *host)
 {
 	size_t	pos;
@@ -95,7 +113,7 @@ static void	test_fragment_splits_mid_hostname(void)
 	out_len = tls_fragment_first_record(ch, len, at, out, sizeof(out));
 	assert(out_len > 0);
 	assert_reassembles(ch, len, out, (size_t)out_len, at);
-	assert(memmem(out, (size_t)out_len, "discord.com", 11) == NULL);
+	assert(find_bytes(out, (size_t)out_len, "discord.com", 11) == NULL);
 }
 
 /* Only the start of a record arrived in the first read: the headers

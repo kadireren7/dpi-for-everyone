@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "tpd.h"
+#include "tp_platform.h"
 
-#include <arpa/inet.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -61,37 +61,31 @@ static int	note(int family, const uint8_t *addr, int64_t now)
 	return (1);
 }
 
-/* All new addresses of `ans` in one `nft` run. */
+/* The new addresses of `ans`, handed to the platform layer at once
+ * (Linux: one `nft` run). */
 void	tpd_quic_block_answer(const t_dns_answer *ans)
 {
-	char	script[DNS_MAX_ADDRS * 512];
-	char	text[INET6_ADDRSTRLEN];
-	size_t	len;
-	size_t	n;
-	size_t	i;
-	int		add;
+	t_dns_addr	fresh[DNS_MAX_ADDRS];
+	size_t		n;
+	size_t		i;
+	int			add;
 
-	len = 0;
+	n = 0;
 	i = 0;
-	while (i < ans->count)
+	while (i < ans->count && i < DNS_MAX_ADDRS)
 	{
 		pthread_mutex_lock(&g_seen_lock);
 		add = note(ans->addrs[i].family, ans->addrs[i].addr, tpd_now());
 		pthread_mutex_unlock(&g_seen_lock);
-		if (add && inet_ntop(ans->addrs[i].family == 6 ? AF_INET6 : AF_INET,
-				ans->addrs[i].addr, text, sizeof(text)) != NULL)
-		{
-			n = tp_nft_quic_block(script + len, sizeof(script) - len,
-					ans->addrs[i].family, text);
-			len += n;
-			if (n > 0)
-				tpd_debug("[quic] %s: UDP/443 rejected (falls back to TCP)",
-					text);
-		}
+		if (add)
+			fresh[n++] = ans->addrs[i];
 		i++;
 	}
-	if (len > 0)
-		tp_nft_run(script, len, 1);
+	if (n == 0)
+		return ;
+	tpp_quic_block(fresh, n);
+	tpd_debug("[quic] %zu address(es): UDP/443 rejected (falls back to TCP)",
+		n);
 }
 
 void	tpd_quic_block(int family, const uint8_t *addr)

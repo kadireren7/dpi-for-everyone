@@ -11,10 +11,9 @@
 # include "tp.h"
 # include "tp_sys.h"
 
-# include <netinet/in.h>
+# include "platform.h"
 # include <pthread.h>
 # include <stdint.h>
-# include <sys/socket.h>
 
 typedef struct s_tpd_stats
 {
@@ -50,17 +49,39 @@ typedef struct s_tpd
 	t_dns_doh			*doh;		/* NULL: plain UDP only */
 	int					dns_intercept;	/* forwarder up, DNS redirected */
 	int					conflict;	/* another interceptor's table seen */
+	const char			*conflict_text;
 	pthread_mutex_t		dns_lock;
 }	t_tpd;
 
 extern t_tpd	g_tpd;
 
+/* MinGW builds use __USE_MINGW_ANSI_STDIO (see the Makefile): the
+ * C99 printf family, which GCC checks as gnu_printf */
+# ifdef __MINGW32__
+#  define TPD_PRINTF gnu_printf
+# else
+#  define TPD_PRINTF printf
+# endif
+
 void	tpd_log(const char *fmt, ...)
-		__attribute__((format(printf, 1, 2)));
+		__attribute__((format(TPD_PRINTF, 1, 2)));
 void	tpd_debug(const char *fmt, ...)
-		__attribute__((format(printf, 1, 2)));
+		__attribute__((format(TPD_PRINTF, 1, 2)));
 int64_t	tpd_now(void);
 int64_t	tpd_now_ms(void);	/* monotonic */
+
+/* transparent.c: a listening socket (SOCK_STREAM) or bound datagram
+ * socket (SOCK_DGRAM) on loopback — or on the wildcard address where
+ * the platform needs it (tpp_listen_wildcard) — at `port`; -1 on
+ * failure. tpd_accept: accept(), close-on-exec where it matters. */
+int		tpd_listen(int family, int type, int port);
+int		tpd_accept(int listen_fd);
+
+/* net.c: TCP connect to an already-resolved address, bounded by
+ * `timeout_ms`, TCP_NODELAY set, prepared by tpp_prepare_socket (so it
+ * is never intercepted itself). Blocking socket, or -1. */
+int		tpd_connect(const struct sockaddr *addr, socklen_t addr_len,
+			int timeout_ms);
 
 /* dnsfwd.c: starts the UDP+TCP forwarder on 127.0.0.1:port and, if
  * *ipv6, [::1]:port (clears *ipv6 if that one fails). -1 if the IPv4

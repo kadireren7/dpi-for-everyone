@@ -77,6 +77,15 @@ jobs:
           curl --socks5 127.0.0.1:1080 -sI https://example.com | tee /tmp/out.txt
           grep -q "HTTP/" /tmp/out.txt
 
+  linux-e2e:
+    # Real install -> intercept -> bypass -> stop -> crash -> uninstall
+    # cycle of transparent mode (the runner has sudo and nftables).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev nftables
+      - run: ./scripts/e2e-test-linux.sh
+
   windows:
     runs-on: windows-latest
     defaults:
@@ -87,11 +96,24 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc make curl
-      - run: make windows CC_WIN=gcc
-      - name: smoke test
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl make curl unzip
+      - name: WinDivert SDK (pinned SHA-256)
+        run: ./scripts/windows/fetch-windivert.sh
+      - run: make windows CC_WIN=gcc OPENSSL_WIN_PREFIX=/mingw64
+      - name: unit tests (shared core, native Windows)
         run: |
-          ./dpi-proxy.exe &
+          make windows-tests CC_WIN=gcc OPENSSL_WIN_PREFIX=/mingw64
+          for t in tests/unit/test_*.exe; do ./$t; done
+      - name: package
+        run: ./scripts/windows/package.sh dist
+      - name: SOCKS5 smoke test
+        run: |
+          ./dist/dpi-proxy.exe &
           sleep 1
           curl --socks5 127.0.0.1:1080 -sI https://example.com | tee /tmp/out.txt
           grep -q "HTTP/" /tmp/out.txt
+          kill %1 || true
+      - name: transparent mode end-to-end (real WinDivert, Administrator)
+        shell: pwsh
+        run: ./scripts/windows/e2e-test.ps1 -Package dist
