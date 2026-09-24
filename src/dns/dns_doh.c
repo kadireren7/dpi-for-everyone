@@ -1,38 +1,26 @@
 #define _GNU_SOURCE
 #include "dns.h"
 #include "dns_doh.h"
+#include "compat.h"
 #include "relay.h"
+#include "tlsclient.h"
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-#include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
-#include <time.h>
-#include <unistd.h>
-
-#ifndef SO_MARK
-# define SO_MARK 36
-#endif
 
 /* ============================================================
  * DNS-over-HTTPS transport (RFC 8484, POST, HTTP/1.1 keep-alive).
  *
  * The servers are dialled by IP literal, so resolving them needs no
- * DNS. TLS runs over memory BIOs: every byte OpenSSL wants to send
- * passes through here, which lets the first flight (the ClientHello,
- * SNI e.g. "cloudflare-dns.com") go out re-framed with TLSREC, just
- * like the connections we proxy — so a DPI that matches DoH SNIs sees
- * no more than it does for them. The certificate is verified against
- * the system CA store and the provider's hostname.
+ * DNS. TLS goes through tlsclient.c, so the first flight (the
+ * ClientHello, SNI e.g. "cloudflare-dns.com") goes out re-framed with
+ * TLSREC, just like the connections we proxy — a DPI that matches DoH
+ * SNIs sees no more than it does for them. The certificate is
+ * verified against the system trust store and the provider's
+ * hostname.
  *
  * Connections are pooled per server and reused; one that fails is
  * closed and the query retried once on a fresh connection.
@@ -44,10 +32,7 @@
 
 typedef struct s_doh_conn
 {
-	int		fd;
-	SSL		*ssl;
-	BIO		*rbio;
-	BIO		*wbio;
+	t_tlsc	*tls;
 	int64_t	last_used;
 }	t_doh_conn;
 
@@ -67,17 +52,14 @@ struct s_dns_doh
 	size_t				count;
 	int					so_mark;
 	int					split;
-	SSL_CTX				*ctx;
+	void				*ctx;
 	pthread_mutex_t		lock;
 	t_dns_udp_servers	*fallback;
 };
 
 static int64_t	now_ms(void)
 {
-	struct timespec	ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+	return (compat_now_ms());
 }
 
 /* ---- setup ---- */
@@ -148,17 +130,12 @@ t_dns_doh	*dns_doh_new(const char *list, int so_mark,
 		if (n > 0 && parse_server(&d->srv[d->count], item) == 0)
 			d->count++;
 	}
-	d->ctx = SSL_CTX_new(TLS_client_method());
-	if (d->count == 0 || d->ctx == NULL
-		|| SSL_CTX_set_default_verify_paths(d->ctx) != 1)
+	d->ctx = tlsc_ctx_new("http/1.1");
+	if (d->count == 0 || d->ctx == NULL)
 	{
 		dns_doh_free(d);
 		return (NULL);
 	}
-	SSL_CTX_set_min_proto_version(d->ctx, TLS1_2_VERSION);
-	SSL_CTX_set_verify(d->ctx, SSL_VERIFY_PEER, NULL);
-	SSL_CTX_set_alpn_protos(d->ctx, (const unsigned char *)"\x08http/1.1",
-		9);
 	return (d);
 }
 
@@ -183,10 +160,7 @@ static void	conn_free(t_doh_conn *c)
 {
 	if (c == NULL)
 		return ;
-	if (c->ssl != NULL)
-		SSL_free(c->ssl);
-	if (c->fd >= 0)
-		close(c->fd);
+	tlsc_free(c->tls);
 	free(c);
 }
 
@@ -203,8 +177,7 @@ void	dns_doh_free(t_dns_doh *d)
 			conn_free(d->srv[i].idle[--d->srv[i].nidle]);
 		i++;
 	}
-	if (d->ctx != NULL)
-		SSL_CTX_free(d->ctx);
+	tlsc_ctx_free(d->ctx);
 	pthread_mutex_destroy(&d->lock);
 	free(d);
 }
@@ -229,191 +202,71 @@ void	dns_doh_drop_idle(t_dns_doh *d)
 		conn_free(drop[--n]);
 }
 
-/* ---- memory-BIO TLS plumbing ---- */
-
-static int	wait_fd(int fd, short events, int64_t deadline)
-{
-	struct pollfd	pfd;
-	int				left;
-	int				rc;
-
-	left = (int)(deadline - now_ms());
-	if (left <= 0)
-		return (0);
-	pfd.fd = fd;
-	pfd.events = events;
-	pfd.revents = 0;
-	do
-		rc = poll(&pfd, 1, left);
-	while (rc < 0 && errno == EINTR);
-	return (rc > 0);
-}
-
-/* Sends whatever OpenSSL produced; the first flight with `split`. */
-static int	flush_out(t_doh_conn *c, int split)
-{
-	unsigned char	buf[16384];
-	int				n;
-
-	while (BIO_ctrl_pending(c->wbio) > 0)
-	{
-		n = BIO_read(c->wbio, buf, sizeof(buf));
-		if (n <= 0)
-			return (-1);
-		if (relay_send_first(c->fd, buf, (size_t)n, split) != 0)
-			return (-1);
-		split = RELAY_SPLIT_NONE;
-	}
-	return (0);
-}
-
-/* Feeds the next bytes from the socket to OpenSSL. */
-static int	feed_in(t_doh_conn *c, int64_t deadline)
-{
-	unsigned char	buf[16384];
-	ssize_t			n;
-
-	if (!wait_fd(c->fd, POLLIN, deadline))
-		return (-1);
-	do
-		n = recv(c->fd, buf, sizeof(buf), 0);
-	while (n < 0 && errno == EINTR);
-	if (n <= 0)
-		return (-1);
-	return (BIO_write(c->rbio, buf, (int)n) == (int)n ? 0 : -1);
-}
-
-static void	fcntl_blocking(int fd)
-{
-	int	flags;
-
-	flags = fcntl(fd, F_GETFL);
-	if (flags >= 0)
-		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-}
+/* ---- connections ---- */
 
 static int	connect_fd(const t_dns_doh *d, const t_doh_server *s,
 	int64_t deadline)
 {
-	int			fd;
-	int			one;
-	int			err;
-	socklen_t	len;
+	int		fd;
+	int		busy;
+	int64_t	left;
 
-	fd = socket(s->addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC
-			| SOCK_NONBLOCK, 0);
+	fd = (int)socket(s->addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
-	if (d->so_mark != 0)
-		setsockopt(fd, SOL_SOCKET, SO_MARK, &d->so_mark, sizeof(d->so_mark));
-	one = 1;
-	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-	if (connect(fd, (const struct sockaddr *)&s->addr, s->addr_len) < 0
-		&& errno != EINPROGRESS)
+	if (dns_prepare_socket(fd, s->addr.ss_family, d->so_mark) != 0)
 	{
-		close(fd);
+		compat_close(fd);
 		return (-1);
 	}
-	err = 0;
-	len = sizeof(err);
-	if (!wait_fd(fd, POLLOUT, deadline)
-		|| getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0)
+	compat_setsockopt_int(fd, IPPROTO_TCP, TCP_NODELAY, 1);
+	compat_set_nonblocking(fd, 1);
+	if (connect(fd, (const struct sockaddr *)&s->addr, s->addr_len) < 0
+		&& !compat_connect_pending())
 	{
-		close(fd);
+		busy = compat_addr_in_use();
+		compat_close(fd);
+		return (busy ? -2 : -1);
+	}
+	left = deadline - now_ms();
+	if (left <= 0 || compat_wait(fd, POLLOUT, (int)left) <= 0
+		|| compat_so_error(fd) != 0)
+	{
+		compat_close(fd);
 		return (-1);
 	}
 	/* blocking from here on; every read is behind a poll deadline */
-	fcntl_blocking(fd);
+	compat_set_nonblocking(fd, 0);
 	return (fd);
 }
 
 static t_doh_conn	*conn_open(t_dns_doh *d, t_doh_server *s, int64_t deadline)
 {
-	t_doh_conn	*c;
-	int			rc;
-	int			first;
+	t_doh_conn		*c;
+	int				fd;
+	int				tries;
+	t_tlsc_result	r;
 
+	/* -2: local port in use (Windows: our port range): new socket */
+	tries = 0;
+	do
+		fd = connect_fd(d, s, deadline);
+	while (fd == -2 && ++tries < 8);
+	if (fd < 0)
+		return (NULL);
 	c = calloc(1, sizeof(*c));
 	if (c == NULL)
-		return (NULL);
-	c->fd = connect_fd(d, s, deadline);
-	c->ssl = (c->fd >= 0) ? SSL_new(d->ctx) : NULL;
-	if (c->ssl == NULL)
 	{
-		conn_free(c);
+		compat_close(fd);
 		return (NULL);
 	}
-	c->rbio = BIO_new(BIO_s_mem());
-	c->wbio = BIO_new(BIO_s_mem());
-	if (c->rbio == NULL || c->wbio == NULL)
+	c->tls = tlsc_handshake(d->ctx, fd, s->host, d->split, deadline, 1, &r);
+	if (c->tls == NULL)
 	{
-		BIO_free(c->rbio);
-		BIO_free(c->wbio);
-		conn_free(c);
-		return (NULL);
-	}
-	SSL_set_bio(c->ssl, c->rbio, c->wbio);
-	SSL_set_tlsext_host_name(c->ssl, s->host);
-	SSL_set1_host(c->ssl, s->host);
-	SSL_set_connect_state(c->ssl);
-	first = 1;
-	while ((rc = SSL_do_handshake(c->ssl)) != 1)
-	{
-		if (SSL_get_error(c->ssl, rc) != SSL_ERROR_WANT_READ
-			|| flush_out(c, first ? d->split : RELAY_SPLIT_NONE) != 0
-			|| feed_in(c, deadline) != 0)
-		{
-			ERR_clear_error();
-			conn_free(c);
-			return (NULL);
-		}
-		first = 0;
-	}
-	if (flush_out(c, RELAY_SPLIT_NONE) != 0)
-	{
-		conn_free(c);
+		free(c);
 		return (NULL);
 	}
 	return (c);
-}
-
-static int	tls_write(t_doh_conn *c, const void *buf, size_t len,
-	int64_t deadline)
-{
-	int	rc;
-
-	while (len > 0)
-	{
-		rc = SSL_write(c->ssl, buf, (int)len);
-		if (rc <= 0)
-		{
-			if (SSL_get_error(c->ssl, rc) != SSL_ERROR_WANT_READ
-				|| flush_out(c, RELAY_SPLIT_NONE) != 0
-				|| feed_in(c, deadline) != 0)
-				return (-1);
-			continue ;
-		}
-		buf = (const char *)buf + rc;
-		len -= (size_t)rc;
-	}
-	return (flush_out(c, RELAY_SPLIT_NONE));
-}
-
-/* Up to `size` decrypted bytes; -1 on error/EOF/deadline. */
-static int	tls_read(t_doh_conn *c, void *buf, size_t size, int64_t deadline)
-{
-	int	rc;
-
-	while (1)
-	{
-		rc = SSL_read(c->ssl, buf, (int)size);
-		if (rc > 0)
-			return (rc);
-		if (SSL_get_error(c->ssl, rc) != SSL_ERROR_WANT_READ
-			|| flush_out(c, RELAY_SPLIT_NONE) != 0
-			|| feed_in(c, deadline) != 0)
-			return (-1);
-	}
 }
 
 /* ---- HTTP ---- */
@@ -455,8 +308,8 @@ static long	doh_request(t_doh_conn *c, const t_doh_server *s,
 			"Accept: application/dns-message\r\n"
 			"Content-Length: %zu\r\n\r\n", s->host, qlen);
 	if (n <= 0 || (size_t)n >= sizeof(head)
-		|| tls_write(c, head, (size_t)n, deadline) != 0
-		|| tls_write(c, query, qlen, deadline) != 0)
+		|| tlsc_write(c->tls, head, (size_t)n, deadline) != 0
+		|| tlsc_write(c->tls, query, qlen, deadline) != 0)
 		return (-1);
 	have = 0;
 	end = NULL;
@@ -464,7 +317,7 @@ static long	doh_request(t_doh_conn *c, const t_doh_server *s,
 	{
 		if (have >= DOH_HTTP_MAX)
 			return (-1);
-		n = tls_read(c, head + have, DOH_HTTP_MAX - have, deadline);
+		n = tlsc_read(c->tls, head + have, DOH_HTTP_MAX - have, deadline);
 		if (n <= 0)
 			return (-1);
 		have += (size_t)n;
@@ -483,7 +336,7 @@ static long	doh_request(t_doh_conn *c, const t_doh_server *s,
 	memcpy(reply, end + 4, body_have);
 	while (body_have < (size_t)body_len)
 	{
-		n = tls_read(c, reply + body_have, (size_t)body_len - body_have,
+		n = tlsc_read(c->tls, reply + body_have, (size_t)body_len - body_have,
 				deadline);
 		if (n <= 0)
 			return (-1);

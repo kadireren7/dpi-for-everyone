@@ -1,24 +1,17 @@
 #define _GNU_SOURCE
 #include "tpd.h"
 #include "common.h"
+#include "compat.h"
 #include "packet.h"
 #include "relay.h"
 #include "tls_sni.h"
-#include "upstream.h"
+#include "tp_platform.h"
 
-#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
-#include <linux/netfilter_ipv4.h>
-#include <poll.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-
-#ifndef IP6T_SO_ORIGINAL_DST
-# define IP6T_SO_ORIGINAL_DST 80
-#endif
 
 /* How long a client may take to send its first bytes before we assume
  * a server-speaks-first protocol and just pass the connection on. */
@@ -67,55 +60,13 @@ void	tpd_addr_str(const struct sockaddr_storage *ss, char *out,
 
 static int	get_original_dst(t_conn *c)
 {
-	int					rc;
-	struct sockaddr_in	*v4;
-	struct sockaddr_in6	*v6;
-
-	c->original_len = sizeof(c->original);
-	memset(&c->original, 0, sizeof(c->original));
-	if (c->family == AF_INET6)
-		rc = getsockopt(c->client_fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST,
-				&c->original, &c->original_len);
-	else
-		rc = getsockopt(c->client_fd, SOL_IP, SO_ORIGINAL_DST,
-				&c->original, &c->original_len);
-	if (rc < 0)
-		return (-1);
-	/* Anything addressed to loopback — including a direct connection to
-	 * our own listener, which "recovers" itself — was not redirected
-	 * by our rule: refuse rather than loop. */
-	if (c->original.ss_family == AF_INET)
-	{
-		v4 = (struct sockaddr_in *)&c->original;
-		if ((ntohl(v4->sin_addr.s_addr) >> 24) == 127)
-			return (-1);
-		c->original_len = sizeof(*v4);
-	}
-	else if (c->original.ss_family == AF_INET6)
-	{
-		v6 = (struct sockaddr_in6 *)&c->original;
-		if (IN6_IS_ADDR_LOOPBACK(&v6->sin6_addr)
-			|| IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr))
-			return (-1);
-		c->original_len = sizeof(*v6);
-	}
-	else
-		return (-1);
-	return (0);
+	return (tpp_original_dst(c->client_fd, c->family, &c->original,
+			&c->original_len));
 }
 
 static int	wait_readable(int fd, int timeout_ms)
 {
-	struct pollfd	pfd;
-	int				rc;
-
-	pfd.fd = fd;
-	pfd.events = POLLIN;
-	pfd.revents = 0;
-	do
-		rc = poll(&pfd, 1, timeout_ms);
-	while (rc < 0 && errno == EINTR);
-	return (rc);
+	return (compat_wait(fd, POLLIN, timeout_ms));
 }
 
 /* SNI of what has arrived so far; a ClientHello split over several
@@ -166,9 +117,9 @@ static size_t	read_client_hello(t_conn *c)
 	{
 		if (wait_readable(c->client_fd, wait_ms) <= 0)
 			break ;
-		n = recv(c->client_fd, c->hello + c->hello_len,
-				sizeof(c->hello) - c->hello_len, 0);
-		if (n < 0 && errno == EINTR)
+		n = compat_recv(c->client_fd, c->hello + c->hello_len,
+				sizeof(c->hello) - c->hello_len);
+		if (n < 0 && compat_interrupted())
 			continue ;
 		if (n <= 0)
 			break ;
@@ -284,27 +235,27 @@ static t_tp_result	attempt(t_conn *c, t_tp_step step, int timeout_ms,
 		dst = &c->trusted;
 		dst_len = c->trusted_len;
 	}
-	fd = connect_upstream_addr((const struct sockaddr *)dst, dst_len,
-			TP_CONNECT_TIMEOUT_MS, TP_SOCKET_MARK);
+	fd = tpd_connect((const struct sockaddr *)dst, dst_len,
+			TP_CONNECT_TIMEOUT_MS);
 	if (fd < 0)
 		return (TP_RES_CONNECT_FAIL);
 	if (relay_send_first(fd, c->hello, c->hello_len,
 			split_mode(step.strategy)) < 0)
 	{
-		close(fd);
+		compat_close(fd);
 		return (TP_RES_RESET);
 	}
 	if (wait_readable(fd, timeout_ms) <= 0)
 	{
-		close(fd);
+		compat_close(fd);
 		return (TP_RES_TIMEOUT);
 	}
 	do
-		n = recv(fd, c->reply, sizeof(c->reply), 0);
-	while (n < 0 && errno == EINTR);
+		n = compat_recv(fd, c->reply, sizeof(c->reply));
+	while (n < 0 && compat_interrupted());
 	if (n <= 0)
 	{
-		close(fd);
+		compat_close(fd);
 		return (n == 0 ? TP_RES_CLOSED : TP_RES_RESET);
 	}
 	c->reply_len = (size_t)n;
@@ -313,7 +264,7 @@ static t_tp_result	attempt(t_conn *c, t_tp_step step, int timeout_ms,
 		return (TP_RES_OK);
 	if (c->reply[0] == 0x15)
 		return (TP_RES_ALERT);
-	close(fd);
+	compat_close(fd);
 	*upstream_fd = -1;
 	return (TP_RES_NOT_TLS);
 }
@@ -324,14 +275,14 @@ static void	passthrough(t_conn *c)
 {
 	int	fd;
 
-	fd = connect_upstream_addr((const struct sockaddr *)&c->original,
-			c->original_len, TP_CONNECT_TIMEOUT_MS, TP_SOCKET_MARK);
+	fd = tpd_connect((const struct sockaddr *)&c->original,
+			c->original_len, TP_CONNECT_TIMEOUT_MS);
 	if (fd < 0)
 		return ;
 	if (c->hello_len == 0
 		|| relay_send_all(fd, c->hello, c->hello_len) == 0)
 		relay_pump(c->client_fd, fd, NULL);
-	close(fd);
+	compat_close(fd);
 }
 
 static void	fill_plan(t_conn *c, int64_t now)
@@ -472,7 +423,7 @@ static void	run_plan(t_conn *c)
 		if (r == TP_RES_OK || r == TP_RES_ALERT)
 		{
 			commit(c, step, upstream_fd, started);
-			close(upstream_fd);
+			compat_close(upstream_fd);
 			return ;
 		}
 	}
@@ -502,7 +453,7 @@ void	tpd_handle_connection(int client_fd, int family)
 	c->family = family;
 	if (get_original_dst(c) < 0)
 	{
-		close(client_fd);
+		compat_close(client_fd);
 		return ;
 	}
 	pthread_mutex_lock(&g_tpd.lock);
@@ -530,9 +481,10 @@ void	tpd_handle_connection(int client_fd, int family)
 		 * like the connection it would have had */
 		lg.l_onoff = 1;
 		lg.l_linger = 0;
-		setsockopt(client_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+		setsockopt(client_fd, SOL_SOCKET, SO_LINGER, (const char *)&lg,
+			sizeof(lg));
 	}
-	close(client_fd);
+	compat_close(client_fd);
 	pthread_mutex_lock(&g_tpd.lock);
 	g_tpd.stats.flows_active--;
 	pthread_mutex_unlock(&g_tpd.lock);

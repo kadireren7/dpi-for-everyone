@@ -2,7 +2,7 @@
 #include "common.h"
 #include "platform.h"
 #include "socks.h"
-#ifdef __linux__
+#ifdef HAVE_TRANSPARENT
 # include "tp_sys.h"
 #endif
 
@@ -24,11 +24,13 @@ static void	print_usage(const char *argv0)
 		"Options:\n"
 		"  --listen HOST:PORT   bind address (default 127.0.0.1:%d)\n"
 		"  --mode proxy         SOCKS5 proxy (default)\n"
-		"  --mode transparent   Linux, root/CAP_NET_ADMIN: intercept\n"
-		"                       outgoing TCP/443 system-wide via nftables\n"
-		"                       and bypass DPI automatically (normally run\n"
-		"                       by the dpi-proxy-transparent service)\n"
+		"  --mode transparent   Linux (root) / Windows (administrator):\n"
+		"                       intercept outgoing HTTPS and DNS\n"
+		"                       system-wide (nftables / WinDivert) and\n"
+		"                       bypass DPI automatically (normally run\n"
+		"                       by the installed service)\n"
 		"                       — see docs/transparent-mode.md\n"
+		"  --service            Windows: run as the \"dpi-proxy\" service\n"
 		"  --port PORT          transparent listener port (default %d)\n"
 		"  --debug              transparent mode: log every connection\n"
 		"  --log-level LEVEL    error|info (default: info) — \"error\"\n"
@@ -52,10 +54,10 @@ static void	print_capabilities(void)
 	capabilities_probe_linux(&net_admin, &net_raw, &raw_socket);
 	printf("platform: %s\n", capabilities_platform());
 	printf("proxy_mode: supported\n");
-#ifdef __linux__
+#ifdef HAVE_TRANSPARENT
 	printf("transparent_mode: supported (--mode transparent)\n");
 #else
-	printf("transparent_mode: not on this platform (Linux only)\n");
+	printf("transparent_mode: not built into this binary\n");
 #endif
 	printf("packet_mode: not built into this binary "
 		"(see dpi-proxy-packet, Linux only)\n");
@@ -104,12 +106,14 @@ int	main(int argc, char **argv)
 	int			transparent;
 	int			tp_port;
 	int			tp_debug;
+	int			tp_service;
 
 	host = NULL;
 	port = DPI_PROXY_PORT;
 	transparent = 0;
 	tp_port = 0;
 	tp_debug = 0;
+	tp_service = 0;
 
 	i = 1;
 	while (i < argc)
@@ -165,6 +169,8 @@ int	main(int argc, char **argv)
 		}
 		else if (strcmp(argv[i], "--debug") == 0)
 			tp_debug = 1;
+		else if (strcmp(argv[i], "--service") == 0)
+			tp_service = 1;
 		else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc)
 		{
 			i++;
@@ -191,9 +197,9 @@ int	main(int argc, char **argv)
 		return (1);
 	}
 
-	if (transparent)
+	if (transparent || tp_service)
 	{
-#ifdef __linux__
+#ifdef HAVE_TRANSPARENT
 		t_tp_options	opt;
 
 		tp_options_default(&opt);
@@ -201,15 +207,25 @@ int	main(int argc, char **argv)
 			opt.port = tp_port;
 		if (tp_debug)
 			opt.debug = 1;
+# ifdef _WIN32
+		setvbuf(stderr, NULL, _IONBF, 0);
+# else
 		setvbuf(stderr, NULL, _IOLBF, 0);
-		rc = run_transparent_server(&opt);
+# endif
+# ifdef _WIN32
+		if (tp_service)
+			rc = tp_windows_service_run(&opt);
+		else
+# endif
+			rc = run_transparent_server(&opt);
 		platform_cleanup();
 		return (rc < 0 ? 1 : 0);
 #else
 		(void)tp_port;
 		(void)tp_debug;
-		fprintf(stderr, "--mode transparent is Linux-only; use the "
-			"SOCKS5 proxy (the default mode) on this platform\n");
+		fprintf(stderr, "--mode transparent is not available in this "
+			"build (Linux and Windows only); use the SOCKS5 proxy (the "
+			"default mode)\n");
 		return (1);
 #endif
 	}

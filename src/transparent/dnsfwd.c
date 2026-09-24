@@ -1,14 +1,12 @@
 #define _GNU_SOURCE
 #include "tpd.h"
+#include "compat.h"
+#include "tp_platform.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <netinet/in.h>
-#include <poll.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 /* ============================================================
  * Local DNS forwarder. nftables redirects every outgoing UDP/TCP 53
@@ -24,7 +22,9 @@
  * uses TCP, which we can bypass.
  *
  * No cache: the system stub resolver in front of us caches. If no
- * server answers, the client gets SERVFAIL (and retries).
+ * server answers, the client gets SERVFAIL (and retries). Queries the
+ * platform layer did not redirect to us are ignored (tpp_dns_peer_ok;
+ * matters where the listener is not loopback-only).
  * ============================================================ */
 
 #define FWD_MAX_INFLIGHT 128
@@ -127,8 +127,8 @@ static void	*udp_worker(void *p)
 	{
 		n = answer(job->query, job->len, reply, FWD_MSG_MAX, 1);
 		if (n > 0)
-			sendto(job->fd, reply, n, 0, (struct sockaddr *)&job->peer,
-				job->peer_len);
+			sendto(job->fd, (const char *)reply, (int)n, 0,
+				(struct sockaddr *)&job->peer, job->peer_len);
 		free(reply);
 	}
 	free(job);
@@ -153,14 +153,15 @@ static void	*udp_loop(void *p)
 		job = malloc(sizeof(*job));
 		if (job == NULL)
 		{
-			usleep(10000);
+			compat_sleep_ms(10);
 			continue ;
 		}
 		job->fd = fd;
 		job->peer_len = sizeof(job->peer);
-		n = recvfrom(fd, job->query, sizeof(job->query), 0,
+		n = recvfrom(fd, (char *)job->query, sizeof(job->query), 0,
 				(struct sockaddr *)&job->peer, &job->peer_len);
-		if (n < 12 || !take_slot())
+		if (n < 12 || !tpp_dns_peer_ok((struct sockaddr *)&job->peer,
+				job->peer_len, 0) || !take_slot())
 		{
 			/* dropped: the client's own retry timer handles it */
 			free(job);
@@ -180,19 +181,16 @@ static void	*udp_loop(void *p)
 
 static int	read_full(int fd, uint8_t *buf, size_t len, int timeout_ms)
 {
-	struct pollfd	pfd;
-	size_t			have;
-	ssize_t			n;
+	size_t	have;
+	ssize_t	n;
 
 	have = 0;
 	while (have < len)
 	{
-		pfd.fd = fd;
-		pfd.events = POLLIN;
-		if (poll(&pfd, 1, timeout_ms) <= 0)
+		if (compat_wait(fd, POLLIN, timeout_ms) <= 0)
 			return (-1);
-		n = recv(fd, buf + have, len - have, 0);
-		if (n < 0 && errno == EINTR)
+		n = compat_recv(fd, buf + have, len - have);
+		if (n < 0 && compat_interrupted())
 			continue ;
 		if (n <= 0)
 			return (-1);
@@ -207,8 +205,8 @@ static int	write_full(int fd, const uint8_t *buf, size_t len)
 
 	while (len > 0)
 	{
-		n = send(fd, buf, len, MSG_NOSIGNAL);
-		if (n < 0 && errno == EINTR)
+		n = compat_send(fd, buf, len);
+		if (n < 0 && compat_interrupted())
 			continue ;
 		if (n <= 0)
 			return (-1);
@@ -246,17 +244,19 @@ static void	*tcp_worker(void *p)
 	}
 	free(query);
 	free(reply);
-	close(fd);
+	compat_close(fd);
 	give_slot();
 	return (NULL);
 }
 
 static void	*tcp_loop(void *p)
 {
-	int				lfd;
-	int				fd;
-	pthread_t		tid;
-	pthread_attr_t	attr;
+	int						lfd;
+	int						fd;
+	pthread_t				tid;
+	pthread_attr_t			attr;
+	struct sockaddr_storage	peer;
+	socklen_t				peer_len;
 
 	lfd = (int)(intptr_t)p;
 	pthread_attr_init(&attr);
@@ -264,22 +264,25 @@ static void	*tcp_loop(void *p)
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 	while (1)
 	{
-		fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
+		fd = tpd_accept(lfd);
 		if (fd < 0)
 		{
-			if (errno != EINTR)
-				usleep(10000);
+			if (!compat_interrupted())
+				compat_sleep_ms(10);
 			continue ;
 		}
-		if (!take_slot())
+		peer_len = sizeof(peer);
+		if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) != 0
+			|| !tpp_dns_peer_ok((struct sockaddr *)&peer, peer_len, 1)
+			|| !take_slot())
 		{
-			close(fd);
+			compat_close(fd);
 			continue ;
 		}
 		if (pthread_create(&tid, &attr, tcp_worker, (void *)(intptr_t)fd)
 			!= 0)
 		{
-			close(fd);
+			compat_close(fd);
 			give_slot();
 		}
 	}
@@ -288,65 +291,27 @@ static void	*tcp_loop(void *p)
 
 /* ---- setup ---- */
 
-static int	bind_loopback(int family, int type, int port)
-{
-	int					fd;
-	int					one;
-	struct sockaddr_in	v4;
-	struct sockaddr_in6	v6;
-	int					rc;
-
-	fd = socket(family, type | SOCK_CLOEXEC, 0);
-	if (fd < 0)
-		return (-1);
-	one = 1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-	if (family == AF_INET6)
-	{
-		setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
-		memset(&v6, 0, sizeof(v6));
-		v6.sin6_family = AF_INET6;
-		v6.sin6_addr = in6addr_loopback;
-		v6.sin6_port = htons((uint16_t)port);
-		rc = bind(fd, (struct sockaddr *)&v6, sizeof(v6));
-	}
-	else
-	{
-		memset(&v4, 0, sizeof(v4));
-		v4.sin_family = AF_INET;
-		v4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		v4.sin_port = htons((uint16_t)port);
-		rc = bind(fd, (struct sockaddr *)&v4, sizeof(v4));
-	}
-	if (rc < 0 || (type == SOCK_STREAM && listen(fd, 128) < 0))
-	{
-		close(fd);
-		return (-1);
-	}
-	return (fd);
-}
-
 static int	start_family(int family, int port)
 {
 	int			ufd;
 	int			tfd;
 	pthread_t	tid;
 
-	ufd = bind_loopback(family, SOCK_DGRAM, port);
-	tfd = bind_loopback(family, SOCK_STREAM, port);
+	ufd = tpd_listen(family, SOCK_DGRAM, port);
+	tfd = tpd_listen(family, SOCK_STREAM, port);
 	if (ufd < 0 || tfd < 0
 		|| pthread_create(&tid, NULL, udp_loop, (void *)(intptr_t)ufd) != 0)
 	{
 		if (ufd >= 0)
-			close(ufd);
+			compat_close(ufd);
 		if (tfd >= 0)
-			close(tfd);
+			compat_close(tfd);
 		return (-1);
 	}
 	pthread_detach(tid);
 	if (pthread_create(&tid, NULL, tcp_loop, (void *)(intptr_t)tfd) != 0)
 	{
-		close(tfd);
+		compat_close(tfd);
 		return (-1);
 	}
 	pthread_detach(tid);
@@ -359,8 +324,8 @@ int	tpd_dnsfwd_start(int port, int *ipv6)
 		return (-1);
 	if (*ipv6 && start_family(AF_INET6, port) != 0)
 	{
-		tpd_log("[dns] no [::1]:%d forwarder (%s); IPv6 is left alone",
-			port, strerror(errno));
+		tpd_log("[dns] no IPv6 forwarder on port %d (%s); IPv6 is left alone",
+			port, compat_sock_strerror());
 		*ipv6 = 0;
 	}
 	return (0);

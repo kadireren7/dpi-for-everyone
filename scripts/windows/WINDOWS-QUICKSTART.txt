@@ -1,0 +1,47 @@
+dpi-for-everyone - Windows quick start (Beta)
+=============================================
+
+Windows 10/11, 64-bit. Nothing to build or download besides this ZIP.
+
+BEFORE YOU START
+  - Stop GoodbyeDPI, zapret, other DPI tools and VPN/packet-filter
+    programs. Two such tools at once interfere with each other.
+  - Windows Defender or another antivirus may warn about WinDivert.
+    WinDivert (WinDivert.dll, WinDivert64.sys) is a signed third-party
+    packet interception driver (LGPLv3/GPLv2, see WinDivert-LICENSE.txt),
+    not our code. dpi-proxy uses it only to send this computer's own
+    HTTPS and DNS traffic through the local dpi-proxy service.
+
+INSTALL
+  1. Extract this ZIP to any folder.
+  2. Open PowerShell as Administrator
+     (Start menu -> type "PowerShell" -> right click ->
+     "Run as administrator"), then go to the extracted folder, e.g.:
+         cd "$env:USERPROFILE\Downloads\dpi-proxy-windows-x86_64"
+  3. Run:
+         powershell -ExecutionPolicy Bypass -File .\install.ps1
+  4. Check that it is running:
+         .\dpi-proxy-ctl status
+     (in any NEW PowerShell window simply: dpi-proxy-ctl status)
+     You should see "engine: running".
+  5. Use Discord, Chrome, Firefox, ... normally. No proxy settings,
+     no DNS changes, nothing to configure in any application.
+
+IF SOMETHING DOES NOT WORK
+         dpi-proxy-ctl diagnose discord.com
+         dpi-proxy-ctl logs 50
+  and send the output (or screenshots) to whoever gave you this.
+
+EVERYDAY COMMANDS
+         dpi-proxy-ctl status
+         dpi-proxy-ctl stop       (Administrator; normal internet, no bypass)
+         dpi-proxy-ctl start      (Administrator)
+         dpi-proxy-ctl restart    (Administrator)
+
+UNINSTALL (PowerShell as Administrator, in the extracted folder)
+         powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+  Add -Purge to also delete settings and logs (%ProgramData%\dpi-proxy).
+
+This is a beta: it has been tested end-to-end on Windows, but not yet
+on many real ISP networks. It is not a VPN and never decrypts traffic.
+More: https://github.com/kadireren7/dpi-for-everyone

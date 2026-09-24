@@ -1,14 +1,11 @@
 #define _GNU_SOURCE
 #include "tpd.h"
+#include "compat.h"
 #include "netfingerprint.h"
+#include "tp_platform.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
-#include <linux/netlink.h>
-#include <linux/rtnetlink.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,10 +16,11 @@
 #include <unistd.h>
 
 /* ============================================================
- * `dpi-proxy --mode transparent` (Linux): the SOCKS proxy's stream
- * core (relay.c) behind a loopback listener that nftables REDIRECTs
- * outgoing TCP/443 to. See tp.h for the decision model and
- * docs/transparent-mode.md for operation.
+ * `dpi-proxy --mode transparent`: the SOCKS proxy's stream core
+ * (relay.c) behind a listener that the platform layer (tp_platform.h:
+ * nftables on Linux, WinDivert on Windows) redirects outgoing TCP/443
+ * to. See tp.h for the decision model and docs/transparent-mode.md for
+ * operation.
  *
  * Threads: this main loop (accept, heartbeat, network watch, status),
  * one detached thread per connection (conn.c, same model as
@@ -48,10 +46,44 @@ int64_t	tpd_now(void)
 
 int64_t	tpd_now_ms(void)
 {
-	struct timespec	ts;
+	return (compat_now_ms());
+}
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+/* Log lines go to stderr (the journal, under systemd) and, when a log
+ * file is configured (the Windows service has no journal), appended
+ * there with a timestamp; the file is rotated to <file>.1 at 4 MB. */
+#define LOG_FILE_MAX (4L * 1024 * 1024)
+
+static pthread_mutex_t	g_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void	log_to_file(const char *line)
+{
+	FILE		*f;
+	char		old[4096];
+	char		stamp[32];
+	time_t		now;
+	struct tm	tm;
+	long		size;
+
+	f = fopen(g_tpd.opt.log_file, "a");
+	if (f == NULL)
+		return ;
+	now = time(NULL);
+#ifdef _WIN32
+	localtime_s(&tm, &now);
+#else
+	localtime_r(&now, &tm);
+#endif
+	strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
+	fprintf(f, "%s %s\n", stamp, line);
+	size = ftell(f);
+	fclose(f);
+	if (size > LOG_FILE_MAX && snprintf(old, sizeof(old), "%s.1",
+			g_tpd.opt.log_file) < (int)sizeof(old))
+	{
+		remove(old);
+		rename(g_tpd.opt.log_file, old);
+	}
 }
 
 static void	vlog(const char *fmt, va_list ap)
@@ -60,6 +92,12 @@ static void	vlog(const char *fmt, va_list ap)
 
 	vsnprintf(line, sizeof(line), fmt, ap);
 	fprintf(stderr, "%s\n", line);
+	if (g_tpd.opt.log_file != NULL)
+	{
+		pthread_mutex_lock(&g_log_lock);
+		log_to_file(line);
+		pthread_mutex_unlock(&g_log_lock);
+	}
 }
 
 void	tpd_log(const char *fmt, ...)
@@ -92,6 +130,35 @@ static const char	*env_or(const char *name, const char *fallback)
 	return (fallback);
 }
 
+#ifdef _WIN32
+
+/* %ProgramData%\dpi-proxy\<name> */
+static const char	*data_path(const char *name)
+{
+	static char	paths[4][512];
+	static int	next;
+	const char	*base;
+	char		*p;
+
+	base = getenv("ProgramData");
+	if (base == NULL || base[0] == '\0')
+		base = "C:\\ProgramData";
+	p = paths[next++ % 4];
+	snprintf(p, sizeof(paths[0]), "%s\\dpi-proxy\\%s", base, name);
+	return (p);
+}
+# define DEFAULT_STRATEGY_CONF data_path("strategy.conf")
+# define DEFAULT_DECISIONS data_path("tp-decisions.conf")
+# define DEFAULT_STATUS data_path("transparent.status")
+# define DEFAULT_LOG_FILE data_path("dpi-proxy.log")
+#else
+# define DEFAULT_STRATEGY_CONF "/etc/dpi-proxy/strategy.conf"
+# define DEFAULT_DECISIONS "/var/lib/dpi-proxy/tp-decisions.conf"
+# define DEFAULT_STATUS "/run/dpi-proxy/transparent.status"
+/* under systemd, stderr is the journal */
+# define DEFAULT_LOG_FILE NULL
+#endif
+
 void	tp_options_default(t_tp_options *opt)
 {
 	const char	*v;
@@ -104,11 +171,10 @@ void	tp_options_default(t_tp_options *opt)
 	v = getenv("DPI_PROXY_LOG_LEVEL");
 	opt->debug = (v != NULL && strcmp(v, "debug") == 0);
 	opt->strategy_conf = env_or("DPI_PROXY_STRATEGY_CONF",
-			"/etc/dpi-proxy/strategy.conf");
-	opt->decisions_file = env_or("DPI_PROXY_TP_DECISIONS",
-			"/var/lib/dpi-proxy/tp-decisions.conf");
-	opt->status_file = env_or("DPI_PROXY_TP_STATUS",
-			"/run/dpi-proxy/transparent.status");
+			DEFAULT_STRATEGY_CONF);
+	opt->decisions_file = env_or("DPI_PROXY_TP_DECISIONS", DEFAULT_DECISIONS);
+	opt->status_file = env_or("DPI_PROXY_TP_STATUS", DEFAULT_STATUS);
+	opt->log_file = env_or("DPI_PROXY_LOG_FILE", DEFAULT_LOG_FILE);
 	opt->dns_servers = env_or("DPI_PROXY_DNS_SERVERS", DNS_DEFAULT_SERVERS);
 	/* DPI_PROXY_TP_DNS: forwarder port, or 0/off to leave DNS alone */
 	opt->dns_port = TP_DEFAULT_DNS_PORT;
@@ -159,13 +225,13 @@ static int	write_file_atomic(const char *path, const char *data, size_t len)
 
 	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
 		return (-1);
-	f = fopen(tmp, "w");
+	f = fopen(tmp, "wb");
 	if (f == NULL)
 		return (-1);
 	w = fwrite(data, 1, len, f);
-	if (fclose(f) != 0 || w != len || rename(tmp, path) != 0)
+	if (fclose(f) != 0 || w != len || compat_rename_replace(tmp, path) != 0)
 	{
-		unlink(tmp);
+		remove(tmp);
 		return (-1);
 	}
 	return (0);
@@ -256,7 +322,7 @@ static void	write_status(const char *engine)
 			"bypassed: %lu\nfailures: %lu\nverified_ok: %lu\n"
 			"verified_bad: %lu\ndecisions: %zu\nlast_learned: %s\n"
 			"dns_intercept: %s\ndns_queries: %lu\ndns_failures: %lu\n"
-			"conflict: %s\n",
+			"conflict: %s\ninterception: %s\n",
 			engine, (int)getpid(), g_tpd.started_at, tpd_now(),
 			g_tpd.opt.port, dns_ok ? "healthy" : "degraded", fp,
 			s.flows_total, s.flows_active, s.passthrough, s.direct,
@@ -264,7 +330,8 @@ static void	write_status(const char *engine)
 			learned[0] ? learned : "-",
 			g_tpd.dns_intercept ? (g_tpd.doh ? "doh" : "plain") : "off",
 			s.dns_queries, s.dns_failures,
-			g_tpd.conflict ? "dpi-bypass table active" : "none");
+			g_tpd.conflict && g_tpd.conflict_text ? g_tpd.conflict_text
+			: "none", tpp_name());
 	if (n > 0 && (size_t)n < sizeof(buf))
 		write_file_atomic(g_tpd.opt.status_file, buf, (size_t)n);
 }
@@ -332,50 +399,20 @@ static int	init_dns(void)
  * We can't fix that from here; say so loudly. */
 static void	check_conflicts(void)
 {
-	static const char	*probe = "list table ip dpibypass\n";
-	int					seen;
+	const char	*seen;
 
-	seen = (tp_nft_run(probe, strlen(probe), 1) == 0);
-	if (seen && !g_tpd.conflict)
-		tpd_log("[conflict] WARNING: the dpi-bypass service's nftables "
-			"table (ip dpibypass) is active. Two transparent interceptors "
+	seen = tpp_conflict();
+	if (seen != NULL && !g_tpd.conflict)
+		tpd_log("[conflict] WARNING: %s. Two transparent interceptors "
 			"proxy each other's traffic and break connections: stop one "
-			"(`sudo systemctl stop dpi-bypass`).");
-	else if (!seen && g_tpd.conflict)
-		tpd_log("[conflict] dpi-bypass's table is gone; no conflict");
-	g_tpd.conflict = seen;
+			"(e.g. `sudo systemctl stop dpi-bypass`).", seen);
+	else if (seen == NULL && g_tpd.conflict)
+		tpd_log("[conflict] the other interceptor is gone; no conflict");
+	g_tpd.conflict = (seen != NULL);
+	g_tpd.conflict_text = seen;
 }
 
 /* ---- network watch ---- */
-
-static int	open_netlink(void)
-{
-	int					fd;
-	struct sockaddr_nl	sa;
-
-	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC,
-			NETLINK_ROUTE);
-	if (fd < 0)
-		return (-1);
-	memset(&sa, 0, sizeof(sa));
-	sa.nl_family = AF_NETLINK;
-	sa.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR
-		| RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE;
-	if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0)
-	{
-		close(fd);
-		return (-1);
-	}
-	return (fd);
-}
-
-static void	drain(int fd)
-{
-	char	buf[8192];
-
-	while (recv(fd, buf, sizeof(buf), 0) > 0)
-		;
-}
 
 /* Recomputes the network fingerprint; on a change, forgets what was
  * specific to the old network (DNS answers, cooldowns, direct-bad
@@ -386,7 +423,7 @@ static void	check_network(void)
 	uint64_t	fp;
 	uint64_t	old;
 
-	fp = netfingerprint_current();
+	fp = tpp_network_fingerprint();
 	pthread_mutex_lock(&g_tpd.lock);
 	old = g_tpd.fp;
 	if (fp != old)
@@ -401,7 +438,7 @@ static void	check_network(void)
 	dns_cache_flush(g_tpd.dns);
 	if (g_tpd.doh != NULL)
 		dns_doh_drop_idle(g_tpd.doh);
-	tp_nft_flush_quic();
+	tpp_quic_flush();
 	tpd_quic_forget();
 	tpd_log("[network] profile %016" PRIx64 " -> %016" PRIx64 "%s", old, fp,
 		fp == NETFP_UNKNOWN ? " (no default route: nothing is learned "
@@ -410,25 +447,29 @@ static void	check_network(void)
 
 /* ---- listeners ---- */
 
-static int	listen_on(int family, int port)
+int	tpd_listen(int family, int type, int port)
 {
 	int					fd;
-	int					one;
 	struct sockaddr_in	v4;
 	struct sockaddr_in6	v6;
 	int					rc;
 
-	fd = socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	fd = (int)socket(family, type | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
-	one = 1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#ifdef _WIN32
+	/* Windows' SO_REUSEADDR would let another process bind the same
+	 * port; exclusive use is the equivalent of the POSIX behavior */
+	compat_setsockopt_int(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1);
+#else
+	compat_setsockopt_int(fd, SOL_SOCKET, SO_REUSEADDR, 1);
+#endif
 	if (family == AF_INET6)
 	{
-		setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
+		compat_setsockopt_int(fd, IPPROTO_IPV6, IPV6_V6ONLY, 1);
 		memset(&v6, 0, sizeof(v6));
 		v6.sin6_family = AF_INET6;
-		v6.sin6_addr = in6addr_loopback;
+		v6.sin6_addr = tpp_listen_wildcard() ? in6addr_any : in6addr_loopback;
 		v6.sin6_port = htons((uint16_t)port);
 		rc = bind(fd, (struct sockaddr *)&v6, sizeof(v6));
 	}
@@ -436,13 +477,14 @@ static int	listen_on(int family, int port)
 	{
 		memset(&v4, 0, sizeof(v4));
 		v4.sin_family = AF_INET;
-		v4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		v4.sin_addr.s_addr = htonl(tpp_listen_wildcard() ? INADDR_ANY
+				: INADDR_LOOPBACK);
 		v4.sin_port = htons((uint16_t)port);
 		rc = bind(fd, (struct sockaddr *)&v4, sizeof(v4));
 	}
-	if (rc < 0 || listen(fd, 512) < 0)
+	if (rc < 0 || (type == SOCK_STREAM && listen(fd, 512) < 0))
 	{
-		close(fd);
+		compat_close(fd);
 		return (-1);
 	}
 	return (fd);
@@ -464,19 +506,29 @@ static void	*conn_thread(void *p)
 	return (NULL);
 }
 
+int	tpd_accept(int listen_fd)
+{
+#ifdef __linux__
+	/* close-on-exec: the nft helper runs in forked children */
+	return (accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC));
+#else
+	return ((int)accept(listen_fd, NULL, NULL));
+#endif
+}
+
 static void	accept_one(int listen_fd, int family, pthread_attr_t *attr)
 {
 	int			fd;
 	t_conn_arg	*arg;
 	pthread_t	tid;
 
-	fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+	fd = tpd_accept(listen_fd);
 	if (fd < 0)
 		return ;
 	arg = malloc(sizeof(*arg));
 	if (arg == NULL)
 	{
-		close(fd);
+		compat_close(fd);
 		return ;
 	}
 	arg->fd = fd;
@@ -484,12 +536,33 @@ static void	accept_one(int listen_fd, int family, pthread_attr_t *attr)
 	if (pthread_create(&tid, attr, conn_thread, arg) != 0)
 	{
 		tpd_log("[conn] could not start a thread: %s", strerror(errno));
-		close(fd);
+		compat_close(fd);
 		free(arg);
 	}
 }
 
 /* ---- main loop ---- */
+
+void	tp_request_stop(void)
+{
+	g_stop = 1;
+}
+
+#ifdef _WIN32
+
+static void	on_signal(int sig)
+{
+	(void)sig;
+	g_stop = 1;
+}
+
+static void	install_signals(void)
+{
+	signal(SIGTERM, on_signal);
+	signal(SIGINT, on_signal);
+}
+
+#else
 
 static void	on_signal(int sig)
 {
@@ -512,31 +585,33 @@ static void	install_signals(void)
 	signal(SIGPIPE, SIG_IGN);
 }
 
+#endif
+
 static void	heartbeat(void)
 {
-	/* the refresh fails if our table vanished (e.g. someone ran
-	 * `nft flush ruleset`): put it back */
-	if (tp_nft_refresh() != 0)
-	{
-		tpd_log("[nft] table %s missing or broken, reinstalling",
-			TP_NFT_TABLE);
-		if (tp_nft_install(g_tpd.opt.port, g_tpd.ipv6,
-				g_tpd.dns_intercept ? g_tpd.opt.dns_port : 0) != 0)
-			tpd_log("[nft] reinstall failed; traffic is NOT intercepted "
-				"(fail-open)");
-	}
+	int	rc;
+
+	rc = tpp_refresh();
+	if (rc == 1)
+		tpd_log("[%s] interception was missing or broken; reinstalled",
+			tpp_name());
+	else if (rc < 0)
+		tpd_log("[%s] reinstall failed; traffic is NOT intercepted "
+			"(fail-open)", tpp_name());
 	save_decisions();
 	write_status("running");
 }
 
-static void	main_loop(int lfd4, int lfd6, int nlfd)
+static void	main_loop(int lfd4, int lfd6)
 {
-	struct pollfd	pfd[3];
+	t_pollfd		pfd[3];
 	pthread_attr_t	attr;
 	int64_t			next_beat;
 	int64_t			net_due;
 	int64_t			next_netcheck;
 	int64_t			now;
+	int				nlfd;
+	size_t			n;
 
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, CONN_STACK_SIZE);
@@ -544,27 +619,33 @@ static void	main_loop(int lfd4, int lfd6, int nlfd)
 	next_beat = tpd_now_ms() + TP_HEARTBEAT_S * 1000;
 	next_netcheck = tpd_now_ms() + NETCHECK_INTERVAL_S * 1000;
 	net_due = 0;
+	nlfd = tpp_netwatch_fd();
 	while (!g_stop)
 	{
-		pfd[0].fd = lfd4;
-		pfd[1].fd = lfd6;
-		pfd[2].fd = nlfd;
-		pfd[0].events = POLLIN;
-		pfd[1].events = POLLIN;
-		pfd[2].events = POLLIN;
-		pfd[0].revents = 0;
-		pfd[1].revents = 0;
-		pfd[2].revents = 0;
-		if (poll(pfd, 3, 1000) < 0 && errno != EINTR)
+		memset(pfd, 0, sizeof(pfd));
+		n = 0;
+		pfd[n].fd = lfd4;
+		pfd[n++].events = POLLIN;
+		if (lfd6 >= 0)
+		{
+			pfd[n].fd = lfd6;
+			pfd[n++].events = POLLIN;
+		}
+		if (nlfd >= 0)
+		{
+			pfd[n].fd = nlfd;
+			pfd[n++].events = POLLIN;
+		}
+		if (compat_poll(pfd, n, 1000) < 0 && !compat_interrupted())
 			break ;
 		if (pfd[0].revents & POLLIN)
 			accept_one(lfd4, AF_INET, &attr);
-		if (pfd[1].revents & POLLIN)
+		if (lfd6 >= 0 && (pfd[1].revents & POLLIN))
 			accept_one(lfd6, AF_INET6, &attr);
 		now = tpd_now_ms();
-		if (pfd[2].revents & POLLIN)
+		if (nlfd >= 0 && (pfd[n - 1].revents & POLLIN))
 		{
-			drain(nlfd);
+			tpp_netwatch_drain();
 			net_due = now + NETCHANGE_SETTLE_MS;
 		}
 		if ((net_due != 0 && now >= net_due) || now >= next_netcheck)
@@ -590,70 +671,80 @@ static void	main_loop(int lfd4, int lfd6, int nlfd)
 
 int	run_transparent_server(const t_tp_options *opt)
 {
-	int	lfd4;
-	int	lfd6;
-	int	nlfd;
+	int			lfd4;
+	int			lfd6;
+	const char	*where;
 
 	memset(&g_tpd, 0, sizeof(g_tpd));
 	g_tpd.opt = *opt;
 	g_tpd.started_at = tpd_now();
+	g_stop = 0;
 	pthread_mutex_init(&g_tpd.lock, NULL);
 	tp_decisions_init(&g_tpd.dec);
 	install_signals();
+	if (tpp_init() != 0)
+	{
+		tpd_log("cannot initialize the %s platform layer", tpp_name());
+		return (-1);
+	}
+	dns_set_socket_hook(tpp_prepare_socket);
 	if (init_dns() != 0)
 		return (-1);
 	load_strategy_conf();
-	g_tpd.fp = netfingerprint_current();
+	g_tpd.fp = tpp_network_fingerprint();
 	load_decisions();
 	tpd_log("[network] profile %016" PRIx64, g_tpd.fp);
+	where = tpp_listen_wildcard() ? "*" : "127.0.0.1";
 	/* listeners first: the redirect must never point at nothing */
-	lfd4 = listen_on(AF_INET, opt->port);
+	lfd4 = tpd_listen(AF_INET, SOCK_STREAM, opt->port);
 	if (lfd4 < 0)
 	{
-		tpd_log("cannot listen on 127.0.0.1:%d: %s", opt->port,
-			strerror(errno));
+		tpd_log("cannot listen on %s:%d: %s", where, opt->port,
+			compat_sock_strerror());
 		return (-1);
 	}
-	lfd6 = listen_on(AF_INET6, opt->port);
+	lfd6 = tpd_listen(AF_INET6, SOCK_STREAM, opt->port);
 	if (lfd6 < 0)
-		tpd_log("note: no [::1]:%d listener (%s); IPv6 is left alone",
-			opt->port, strerror(errno));
+		tpd_log("note: no IPv6 listener on port %d (%s); IPv6 is left alone",
+			opt->port, compat_sock_strerror());
 	g_tpd.ipv6 = (lfd6 >= 0);
 	if (opt->dns_port > 0)
 	{
 		if (tpd_dnsfwd_start(opt->dns_port, &g_tpd.ipv6) == 0)
 			g_tpd.dns_intercept = 1;
 		else
-			tpd_log("[dns] cannot listen on 127.0.0.1:%d (%s); DNS is NOT "
+			tpd_log("[dns] cannot listen on %s:%d (%s); DNS is NOT "
 				"intercepted — blocked names may resolve to block pages",
-				opt->dns_port, strerror(errno));
+				where, opt->dns_port, compat_sock_strerror());
 	}
-	nlfd = open_netlink();
 	check_conflicts();
-	if (tpd_verify_start() != 0 || tp_nft_install(opt->port, g_tpd.ipv6,
+	if (tpd_verify_start() != 0 || tpp_install(opt->port, g_tpd.ipv6,
 			g_tpd.dns_intercept ? opt->dns_port : 0) != 0)
 	{
-		tpd_log("cannot install nftables table %s (needs CAP_NET_ADMIN "
-			"and the nft binary)", TP_NFT_TABLE);
-		tp_nft_remove();
-		close(lfd4);
+		tpd_log("cannot install %s interception (needs administrator/root "
+			"rights%s)", tpp_name(),
+			strcmp(tpp_name(), "nftables") == 0
+			? ", CAP_NET_ADMIN and the nft binary" : "");
+		tpp_remove();
+		compat_close(lfd4);
 		if (lfd6 >= 0)
-			close(lfd6);
+			compat_close(lfd6);
 		return (-1);
 	}
-	tpd_log("transparent mode: TCP/443 -> 127.0.0.1:%d%s, table inet %s",
-		opt->port, g_tpd.ipv6 ? " / [::1]" : "", TP_NFT_TABLE);
+	tpd_log("transparent mode: TCP/443 -> %s:%d%s via %s", where, opt->port,
+		g_tpd.ipv6 ? " (+IPv6)" : "", tpp_name());
 	if (g_tpd.dns_intercept)
-		tpd_log("transparent mode: DNS (UDP+TCP/53) -> 127.0.0.1:%d%s, "
-			"answered via %s", opt->dns_port, g_tpd.ipv6 ? " / [::1]" : "",
+		tpd_log("transparent mode: DNS (UDP+TCP/53) -> %s:%d%s, "
+			"answered via %s", where, opt->dns_port,
+			g_tpd.ipv6 ? " (+IPv6)" : "",
 			g_tpd.doh != NULL ? "DNS-over-HTTPS" : "plain DNS");
 	write_status("running");
-	main_loop(lfd4, lfd6, nlfd);
+	main_loop(lfd4, lfd6);
 	/* stop intercepting before anything else, so new connections go
 	 * direct while we finish up */
-	tp_nft_remove();
+	tpp_remove();
 	save_decisions();
 	write_status("stopped");
-	tpd_log("stopped; nftables table %s removed", TP_NFT_TABLE);
+	tpd_log("stopped; %s interception removed", tpp_name());
 	return (0);
 }

@@ -1,9 +1,15 @@
-# Transparent mode (Linux)
+# Transparent mode (Linux, Windows)
 
 `dpi-proxy --mode transparent`, run by the `dpi-proxy-transparent`
-systemd service. It is the recommended way to use dpi-for-everyone on
-Linux: after `sudo ./scripts/install.sh` every application's HTTPS and
-DNS go through it, with no proxy settings and no DNS settings anywhere.
+systemd service on Linux and the `dpi-proxy` service on Windows. It is
+the recommended way to use dpi-for-everyone: after installing, every
+application's HTTPS and DNS go through it, with no proxy settings and
+no DNS settings anywhere.
+
+Everything below the interception layer — DNS-over-HTTPS, the decision
+ladder, TLS record fragmentation, learning, verification — is the same
+code on both platforms; only how traffic reaches the daemon differs
+(see [Windows](#windows) for its interception).
 
 ## What it does
 
@@ -97,9 +103,48 @@ sudo dpi-proxy-ctl restart
 sudo dpi-proxy-ctl stop       # internet keeps working, unbypassed
 ```
 
-Logs go to the journal (`journalctl -u dpi-proxy-transparent`);
+On Linux, logs go to the journal (`journalctl -u dpi-proxy-transparent`);
 `DPI_PROXY_LOG_LEVEL=debug` logs every connection attempt. Learned
 decisions live in `/var/lib/dpi-proxy/tp-decisions.conf`.
+
+## Windows
+
+The daemon is the same; interception uses the WinDivert driver
+(third-party, signed, LGPLv3/GPLv2, shipped unmodified next to
+`dpi-proxy.exe`) and the "reflection" technique from WinDivert's own
+samples:
+
+```
+application  A:p  -> D:443        (outbound, captured)
+rewritten    D:p  -> A:1091       (re-injected as inbound: the service's
+                                   listener accepts it; the peer address
+                                   (D, p) is the original destination)
+service      A:1091 -> D:p        (captured)
+rewritten    D:443 -> A:p         (re-injected inbound: the application
+                                   sees its server answering)
+```
+
+DNS (UDP and TCP port 53) is reflected the same way to the forwarder on
+port 1053.
+
+- **Only flows it saw start** are reflected (TCP: the SYN), so
+  connections that existed before the service started are untouched.
+  The listeners (bound to all addresses, since reflected packets are
+  addressed to the machine's own address) refuse any connection or
+  query that is not in that flow table — they can't be used from the
+  network.
+- **Loop prevention:** the service's own sockets bind to local ports
+  45000–45999, which the capture filter excludes (the equivalent of
+  Linux's `SO_MARK`).
+- **Fail-open:** diversion belongs to the service's WinDivert handle;
+  when the process stops or dies, Windows stops diverting at once.
+  The service is restarted automatically after a crash.
+- **QUIC:** only QUIC long-header (handshake) packets are captured at
+  all; those to known-blocked addresses are dropped.
+- A Windows Firewall rule (`dpi-proxy`, inbound, this program only) lets
+  the reflected connections reach the service.
+- Logs: `%ProgramData%\dpi-proxy\dpi-proxy.log` (rotated at 4 MB);
+  `dpi-proxy-ctl logs`.
 
 ## Limitations
 

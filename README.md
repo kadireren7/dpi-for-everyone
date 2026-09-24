@@ -1,10 +1,10 @@
 # dpi-for-everyone
 
 `dpi-proxy` gets HTTPS traffic past SNI-based DPI (deep packet
-inspection) filtering. On Linux it runs as a system service: after one
-install command, blocked sites and apps work in every browser and
-application, with **no proxy settings and no DNS changes**. On Windows
-and macOS it is a local SOCKS5 proxy.
+inspection) filtering. On Linux (and, in beta, on Windows) it runs as a
+system service: after one install command, blocked sites and apps work
+in every browser and application, with **no proxy settings and no DNS
+changes**. On macOS it is a local SOCKS5 proxy for now.
 
 It runs entirely on your own machine. It is not a VPN, it does not
 tunnel through a remote server, and it never decrypts or
@@ -12,11 +12,11 @@ man-in-the-middles TLS.
 
 ## Platforms
 
-| Platform | What you get |
-|---|---|
-| Linux | **Transparent mode** — automatic, system-wide (recommended) |
-| Windows | SOCKS5 proxy only |
-| macOS | SOCKS5 proxy only |
+| Platform | What you get | Validation |
+|---|---|---|
+| Linux | **Transparent automatic mode** | Real ISP/DPI field-tested |
+| Windows 10/11 (x64) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real Windows GitHub runners with the real WinDivert driver; **real ISP/DPI field validation still pending** |
+| macOS | SOCKS5 proxy only, for now | — |
 
 `dpi-proxy --capabilities` prints what the binary you have supports.
 
@@ -92,18 +92,83 @@ experimentation: `sudo ./scripts/install.sh --packet` builds it
 mode replaces it as the automatic engine. See
 [docs/packet-mode.md](docs/packet-mode.md).
 
-## Windows and macOS
+## Windows (Beta)
+
+Windows transparent mode works the same way as on Linux and passes the
+full automated end-to-end test on real Windows machines, but it has
+**not yet been validated against real ISP DPI**. Field reports are
+welcome.
+
+### Quick start
+
+1. Download **`dpi-proxy-windows-x86_64.zip`** from
+   [Releases](https://github.com/kadireren7/dpi-for-everyone/releases)
+   (v1.1.0-rc1 or newer) and extract it.
+2. Open **PowerShell as Administrator** in the extracted folder and run:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+
+3. Check it:
+
+   ```powershell
+   .\dpi-proxy-ctl status        # in a new PowerShell window: dpi-proxy-ctl status
+   ```
+
+   You should see `engine: running`.
+4. Use Firefox, Chrome, Discord, … normally. No proxy arguments, no
+   manual DNS changes, no per-app configuration.
+
+Everything needed is in the ZIP (`dpi-proxy.exe`, `dpi-proxy-ctl`,
+`install.ps1`, `uninstall.ps1`, the WinDivert driver files and license,
+`WINDOWS-QUICKSTART.txt`). No Visual Studio, MinGW, Git or Python; the
+installer puts `dpi-proxy-ctl` on the PATH itself.
+
+Before testing, stop GoodbyeDPI, zapret, other DPI tools and VPN packet
+filters.
+
+### Commands
+
+```powershell
+dpi-proxy-ctl status
+dpi-proxy-ctl diagnose discord.com   # DNS + HTTPS check for one site
+dpi-proxy-ctl logs 50
+dpi-proxy-ctl stop                   # (Administrator) normal internet, no bypass
+dpi-proxy-ctl start                  # (Administrator)
+dpi-proxy-ctl restart                # (Administrator)
+```
+
+Files: `%ProgramFiles%\dpi-proxy` (program), `%ProgramData%\dpi-proxy`
+(`strategy.conf`, learned decisions, `dpi-proxy.log`).
+
+### Uninstall
+
+PowerShell as Administrator, in the extracted folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1          # keeps settings/logs
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge   # removes them too
+```
+
+Removes the service, program folder, firewall rule and PATH entry, and
+unloads the WinDivert driver unless another program is using it.
+
+### WinDivert
+
+Windows interception uses [WinDivert](https://reqrypt.org/windivert.html),
+a **third-party, signed** packet interception driver (LGPLv3/GPLv2) —
+not our code — shipped unmodified in the ZIP with its license. It
+redirects this computer's own outgoing HTTPS and DNS to the local
+service, and stops the moment the service stops or crashes (fail-open).
+Windows Defender or other antivirus software may warn about it because
+DPI tools use it.
+
+## macOS
 
 SOCKS5 proxy only — no system-wide interception, no DNS protection.
 Download the binary from the
 [latest release](https://github.com/kadireren7/dpi-for-everyone/releases/latest):
-
-```powershell
-# Windows
-iwr "https://github.com/kadireren7/dpi-for-everyone/releases/latest/download/dpi-proxy-windows-x86_64.exe" -OutFile dpi-proxy.exe
-$env:DPI_PROXY_SPLIT_TLS = "record"
-.\dpi-proxy.exe
-```
 
 ```sh
 # macOS (Apple silicon)
@@ -115,7 +180,9 @@ It listens on `127.0.0.1:1080`; point an application's SOCKS5 setting
 there. Without `DPI_PROXY_SPLIT_TLS=record` it relays traffic
 unmodified. Names are resolved with the system resolver, so if your
 network poisons DNS you also need to set a trustworthy DNS server
-yourself. Stop it with `Ctrl+C`; remove it by deleting the file.
+yourself. Stop it with `Ctrl+C`; remove it by deleting the file. (The
+Windows `dpi-proxy.exe` can run the same way: `dpi-proxy.exe` without
+arguments is a SOCKS5 proxy.)
 
 ## Limitations
 
@@ -131,9 +198,14 @@ yourself. Stop it with `Ctrl+C`; remove it by deleting the file.
   the TLS server name without reassembling TLS records; they are not
   guaranteed to bypass every censorship system.
 - **One interceptor at a time.** Don't run another transparent DPI tool
-  alongside it; the service warns if it detects one.
-- **No decryption, ever.** Only cleartext handshake bytes are read or
-  re-framed; certificates are verified by your applications as usual.
+  (dpi-bypass, GoodbyeDPI, zapret, …) alongside it; the service warns if
+  it detects one.
+- **Windows (Beta):** not yet validated against real ISP DPI. IPv6
+  interception and the QUIC fallback are implemented but not yet
+  exercised by the automated test (the test machines have no IPv6).
+  All traffic to port 443 passes through the service in user space,
+  which costs some throughput compared to Linux; performance on
+  consumer machines is still to be measured.
 
 ## Documentation
 

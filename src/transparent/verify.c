@@ -1,35 +1,24 @@
 #define _GNU_SOURCE
 #include "tpd.h"
-#include "common.h"
+#include "compat.h"
 #include "discovery.h"
 #include "relay.h"
-#include "upstream.h"
+#include "tlsclient.h"
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 /* ============================================================
- * The verifier: an ordinary OpenSSL handshake with hostname
- * verification (`openssl s_client -verify_hostname`), carried over
- * exactly the step being judged. s_client connects to a one-shot
- * loopback listener; this thread accepts that one connection and
- * relays it with the shared relay core (relay_send_first applies the
- * step's ClientHello treatment, relay_pump_timeout copies the rest)
- * to the step's address on a marked socket. The TLS session and its
- * verification are entirely OpenSSL's; this code only moves bytes
- * and reads the "Verify return code" line (probe_classify_openssl_
- * output, shared with packet mode's prober).
+ * The verifier: an ordinary TLS handshake with certificate and
+ * hostname verification (OpenSSL, system trust store), carried over
+ * exactly the step being judged — the step's address, on a socket
+ * the platform layer keeps out of the interception, with the step's
+ * ClientHello treatment (relay_send_first) on the first flight. Only
+ * a handshake whose certificate verifies for the host counts.
  *
  * One thread, a small bounded queue, and a dedup window: a busy
- * browser can't turn this into a burst of subprocesses.
+ * browser can't turn this into a burst of handshakes.
  * ============================================================ */
 
 #define QUEUE_MAX 16
@@ -95,156 +84,32 @@ void	tpd_verify_submit(const t_tpd_verify_job *job)
 	pthread_mutex_unlock(&g_qlock);
 }
 
-static int	make_listener(int *port)
-{
-	int					fd;
-	struct sockaddr_in	sin;
-	socklen_t			len;
+static void	*g_ctx;
 
-	fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (fd < 0)
-		return (-1);
-	memset(&sin, 0, sizeof(sin));
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	len = sizeof(sin);
-	if (bind(fd, (struct sockaddr *)&sin, sizeof(sin)) < 0
-		|| listen(fd, 1) < 0
-		|| getsockname(fd, (struct sockaddr *)&sin, &len) < 0)
-	{
-		close(fd);
-		return (-1);
-	}
-	*port = ntohs(sin.sin_port);
-	return (fd);
-}
-
-static pid_t	spawn_openssl(const char *host, int port, int *out_fd)
-{
-	int		pipefd[2];
-	pid_t	pid;
-	char	target[32];
-	int		devnull;
-
-	if (pipe2(pipefd, O_CLOEXEC) < 0)
-		return (-1);
-	snprintf(target, sizeof(target), "127.0.0.1:%d", port);
-	pid = fork();
-	if (pid < 0)
-	{
-		close(pipefd[0]);
-		close(pipefd[1]);
-		return (-1);
-	}
-	if (pid == 0)
-	{
-		devnull = open("/dev/null", O_RDONLY);
-		if (devnull >= 0)
-			dup2(devnull, STDIN_FILENO);
-		dup2(pipefd[1], STDOUT_FILENO);
-		dup2(pipefd[1], STDERR_FILENO);
-		execlp("openssl", "openssl", "s_client", "-connect", target,
-			"-servername", host, "-verify_hostname", host, (char *)NULL);
-		_exit(127);
-	}
-	close(pipefd[1]);
-	*out_fd = pipefd[0];
-	return (pid);
-}
-
-/* Carries s_client's one connection over the job's step. */
-static void	carry(int listen_fd, const t_tpd_verify_job *job)
-{
-	struct pollfd	pfd;
-	int				local;
-	int				upstream;
-	unsigned char	first[BUFFER_SIZE];
-	ssize_t			n;
-
-	pfd.fd = listen_fd;
-	pfd.events = POLLIN;
-	pfd.revents = 0;
-	if (poll(&pfd, 1, VERIFY_TIMEOUT_MS) <= 0)
-		return ;
-	local = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
-	if (local < 0)
-		return ;
-	upstream = connect_upstream_addr((const struct sockaddr *)&job->addr,
-			job->addr_len, TP_CONNECT_TIMEOUT_MS, TP_SOCKET_MARK);
-	pfd.fd = local;
-	if (upstream >= 0 && poll(&pfd, 1, VERIFY_TIMEOUT_MS) > 0)
-	{
-		n = recv(local, first, sizeof(first), 0);
-		if (n > 0 && relay_send_first(upstream, first, (size_t)n,
-				relay_split_for(job->step.strategy)) == 0)
-			relay_pump_timeout(local, upstream, NULL, VERIFY_TIMEOUT_MS);
-	}
-	if (upstream >= 0)
-		close(upstream);
-	close(local);
-}
-
-static t_probe_result	collect(pid_t pid, int out_fd)
-{
-	char			buf[32768];
-	size_t			total;
-	ssize_t			n;
-	int				status;
-	struct pollfd	pfd;
-	int64_t			deadline;
-
-	deadline = tpd_now_ms() + VERIFY_TIMEOUT_MS;
-	pfd.fd = out_fd;
-	pfd.events = POLLIN;
-	total = 0;
-	while (total + 1 < sizeof(buf))
-	{
-		pfd.revents = 0;
-		if (tpd_now_ms() >= deadline
-			|| poll(&pfd, 1, (int)(deadline - tpd_now_ms())) <= 0)
-			break ;
-		n = read(out_fd, buf + total, sizeof(buf) - 1 - total);
-		if (n < 0 && errno == EINTR)
-			continue ;
-		if (n <= 0)
-			break ;
-		total += (size_t)n;
-	}
-	buf[total] = '\0';
-	close(out_fd);
-	kill(pid, SIGKILL);
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-		;
-	return (probe_classify_openssl_output(buf));
-}
-
+/* completed handshake + valid certificate: SUCCESS; completed with a
+ * certificate that doesn't verify for the host (e.g. an ISP block
+ * page answering for a poisoned address): REMOTE_REJECTED; no
+ * handshake at all (reset, timeout): TIMEOUT — which is not evidence
+ * about the certificate either way */
 static t_probe_result	verify_job(const t_tpd_verify_job *job)
 {
-	int		listen_fd;
-	int		port;
-	int		out_fd;
-	pid_t	pid;
+	int				fd;
+	t_tlsc			*t;
+	t_tlsc_result	r;
 
-	listen_fd = make_listener(&port);
-	if (listen_fd < 0)
-		return (PROBE_LOCAL_ERROR);
-	pid = spawn_openssl(job->host, port, &out_fd);
-	if (pid < 0)
-	{
-		close(listen_fd);
-		return (PROBE_LOCAL_ERROR);
-	}
-	carry(listen_fd, job);
-	close(listen_fd);
-	return (collect(pid, out_fd));
-}
-
-static void	block_quic(const struct sockaddr_storage *a)
-{
-	char	s[INET6_ADDRSTRLEN];
-
-	tpd_addr_str(a, s, sizeof(s));
-	tp_nft_add_quic(a->ss_family == AF_INET6 ? 6 : 4, s);
+	fd = tpd_connect((const struct sockaddr *)&job->addr, job->addr_len,
+			TP_CONNECT_TIMEOUT_MS);
+	if (fd < 0)
+		return (PROBE_TIMEOUT);
+	t = tlsc_handshake(g_ctx, fd, job->host,
+			relay_split_for(job->step.strategy),
+			compat_now_ms() + VERIFY_TIMEOUT_MS, 0, &r);
+	tlsc_free(t);
+	if (r == TLSC_OK)
+		return (PROBE_SUCCESS);
+	if (r == TLSC_BAD_CERT)
+		return (PROBE_REMOTE_REJECTED);
+	return (PROBE_TIMEOUT);
 }
 
 static void	apply_result(const t_tpd_verify_job *job, t_probe_result r)
@@ -287,8 +152,8 @@ static void	apply_result(const t_tpd_verify_job *job, t_probe_result r)
 			? " — system DNS answer looks poisoned on this network" : "");
 		/* QUIC can't use this bypass: make UDP/443 to these addresses
 		 * fail fast so the application falls back to TCP */
-		block_quic(&job->addr);
-		block_quic(&job->original);
+		tpd_quic_block_sockaddr(&job->addr);
+		tpd_quic_block_sockaddr(&job->original);
 	}
 	else if (job->kind == TPD_VERIFY_CONFIRM)
 		tpd_log("[verify] %s: %s+%s via %s did not verify (%s); not cached",
@@ -327,6 +192,12 @@ int	tpd_verify_start(void)
 	pthread_attr_t	attr;
 	int				rc;
 
+	g_ctx = tlsc_ctx_new(NULL);
+	if (g_ctx == NULL)
+	{
+		tpd_log("[verify] cannot set up TLS (no system trust store?)");
+		return (-1);
+	}
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, 256 * 1024);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);

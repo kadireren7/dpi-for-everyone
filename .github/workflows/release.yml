@@ -20,6 +20,14 @@ jobs:
           name: dpi-proxy-linux-x86_64
           path: dpi-proxy
 
+  # Linux transparent mode must still pass its real end-to-end cycle
+  linux-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev nftables
+      - run: ./scripts/e2e-test-linux.sh
+
   macos:
     runs-on: macos-latest
     steps:
@@ -40,15 +48,26 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc make
-      - run: make windows CC_WIN=gcc
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl make curl unzip zip
+      - run: ./scripts/windows/fetch-windivert.sh
+      - run: make windows CC_WIN=gcc OPENSSL_WIN_PREFIX=/mingw64
+      - run: ./scripts/windows/package.sh dpi-proxy-windows-x86_64
+      # a release is only built from a folder that passed the same
+      # end-to-end test as CI
+      - name: transparent mode end-to-end (real WinDivert, Administrator)
+        shell: pwsh
+        run: ./scripts/windows/e2e-test.ps1 -Package dpi-proxy-windows-x86_64
+      - run: zip -r dpi-proxy-windows-x86_64.zip dpi-proxy-windows-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: dpi-proxy-windows-x86_64
-          path: dpi-proxy.exe
+          path: dpi-proxy-windows-x86_64.zip
 
   publish:
-    needs: [linux, macos, windows]
+    # nothing is published unless every build and both end-to-end
+    # tests (Linux, Windows) passed
+    needs: [linux, linux-e2e, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,9 +79,9 @@ jobs:
           mkdir -p release
           cp dist/dpi-proxy-linux-x86_64/dpi-proxy release/dpi-proxy-linux-x86_64
           cp dist/dpi-proxy-macos-arm64/dpi-proxy release/dpi-proxy-macos-arm64
-          cp dist/dpi-proxy-windows-x86_64/dpi-proxy.exe release/dpi-proxy-windows-x86_64.exe
+          cp dist/dpi-proxy-windows-x86_64/dpi-proxy-windows-x86_64.zip release/
           chmod +x release/dpi-proxy-linux-x86_64 release/dpi-proxy-macos-arm64
-          (cd release && sha256sum dpi-proxy-linux-x86_64 dpi-proxy-macos-arm64 dpi-proxy-windows-x86_64.exe > SHA256SUMS)
+          (cd release && sha256sum dpi-proxy-linux-x86_64 dpi-proxy-macos-arm64 dpi-proxy-windows-x86_64.zip > SHA256SUMS)
       # The only place a release is created: notes come from
       # .github/release-notes/<tag>.md when present.
       - name: create release
@@ -75,10 +94,14 @@ jobs:
           else
             set -- --generate-notes
           fi
+          # v1.2.3-rc1, -beta...: a pre-release, never "Latest"
+          case "${{ github.ref_name }}" in
+            *-*) set -- "$@" --prerelease --latest=false ;;
+          esac
           gh release create "${{ github.ref_name }}" \
             release/dpi-proxy-linux-x86_64 \
             release/dpi-proxy-macos-arm64 \
-            release/dpi-proxy-windows-x86_64.exe \
+            release/dpi-proxy-windows-x86_64.zip \
             release/SHA256SUMS \
             --title "dpi-for-everyone ${{ github.ref_name }}" \
             "$@"
