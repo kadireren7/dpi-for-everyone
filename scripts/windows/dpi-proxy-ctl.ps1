@@ -26,7 +26,7 @@ function Show-Status {
     $state = if ($svc) { $svc.Status.ToString().ToLower() } else { 'not installed' }
     Write-Host "service:   $Service ($state)"
     if (-not $svc -or $svc.Status -ne 'Running' -or -not (Test-Path $StatusFile)) {
-        Write-Host 'engine:    not running — HTTPS and DNS go out directly, untouched'
+        Write-Host 'engine:    not running - HTTPS and DNS go out directly, untouched'
         return
     }
     Write-Host "engine:    $(Field engine) ($(Field interception))"
@@ -41,7 +41,7 @@ function Show-Status {
     Write-Host "verified:  $(Field verified_ok) ok, $(Field verified_bad) rejected"
     Write-Host "learned:   $(Field decisions) decision(s); last: $(Field last_learned)"
     $c = Field conflict
-    if ($c -and $c -ne 'none') { Write-Host "CONFLICT:  $c — stop the other tool" -ForegroundColor Yellow }
+    if ($c -and $c -ne 'none') { Write-Host "CONFLICT:  $c - stop the other tool" -ForegroundColor Yellow }
 }
 
 function Show-Diagnose($domain) {

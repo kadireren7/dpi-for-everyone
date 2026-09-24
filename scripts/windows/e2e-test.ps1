@@ -110,10 +110,19 @@ if ($c2 -notmatch '^[23]\d\d$') { Die "after automatic restart -> '$c2'" }
 Pass "killed: HTTPS still $c; restarted automatically; HTTPS $c2"
 
 Step 'dpi-proxy-ctl'
-& (Join-Path $InstDir 'dpi-proxy-ctl.cmd') status
-& (Join-Path $InstDir 'dpi-proxy-ctl.cmd') diagnose example.com
-& (Join-Path $InstDir 'dpi-proxy-ctl.cmd') logs 20
-Pass 'ctl ran'
+$ctl = Join-Path $InstDir 'dpi-proxy-ctl.cmd'
+$out = (& $ctl status 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'engine:\s+running' -or $out -notmatch 'bypassed:') {
+    Die 'dpi-proxy-ctl status did not report a running engine'
+}
+$out = (& $ctl diagnose example.com 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'https:\s+HTTP \d+') { Die 'dpi-proxy-ctl diagnose failed' }
+$out = (& $ctl logs 5 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'transparent mode:') { Die 'dpi-proxy-ctl logs failed' }
+Pass 'ctl status/diagnose/logs report correctly'
 
 Step 'uninstall cleans only our own state'
 & powershell -ExecutionPolicy Bypass -File (Join-Path $InstDir 'uninstall.ps1') -Purge
