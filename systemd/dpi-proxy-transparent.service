@@ -1,0 +1,53 @@
+[Unit]
+Description=dpi-proxy transparent mode (automatic DPI bypass for outgoing HTTPS and DNS, Linux)
+Documentation=https://github.com/kadireren7/dpi-for-everyone
+# Needs no network at start (resolvers are only asked lazily); the
+# nftables ordering keeps a boot-time `nft -f /etc/nftables.conf`
+# (which may flush the ruleset) from running after us.
+After=nftables.service
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dpi-proxy --mode transparent
+# SIGHUP re-reads strategy.conf (manual rules).
+ExecReload=/bin/kill -HUP $MAINPID
+Environment=DPI_PROXY_STRATEGY_CONF=/etc/dpi-proxy/strategy.conf
+Environment=DPI_PROXY_TP_DECISIONS=/var/lib/dpi-proxy/tp-decisions.conf
+Environment=DPI_PROXY_TP_STATUS=/run/dpi-proxy/transparent.status
+# DNS: every outgoing UDP/TCP 53 query is redirected to a local
+# forwarder on this port and answered over DNS-over-HTTPS (plain DNS
+# only if every DoH server fails). "off" leaves DNS alone.
+Environment=DPI_PROXY_TP_DNS=1053
+# info: startup, learned decisions, failures, network changes only.
+# debug: one line per connection attempt.
+Environment=DPI_PROXY_LOG_LEVEL=info
+StateDirectory=dpi-proxy
+RuntimeDirectory=dpi-proxy
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# Fail-open, three layers:
+#  1. SIGTERM/SIGINT: the daemon deletes its own table before exiting.
+#  2. ExecStopPost runs after *any* stop — clean exit, crash, SIGKILL,
+#     start failure — and deletes the table again ("-": a missing
+#     table is fine). Nothing else in the ruleset is touched.
+#  3. If the process is gone or hung and nothing ran at all, the
+#     redirect rule still stops matching within 30s: it only applies
+#     while the daemon keeps refreshing a timed nft set element.
+ExecStopPost=-/usr/sbin/nft delete table inet dpi_proxy_tp
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Privileges: root, but only CAP_NET_ADMIN (nftables, SO_MARK on its
+# own sockets) can ever be exercised. Both listeners are >1024.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

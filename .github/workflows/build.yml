@@ -1,0 +1,97 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # transparent mode's DNS-over-HTTPS resolver links OpenSSL
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - run: make re
+      - run: make test
+      - name: smoke test
+        run: |
+          ./dpi-proxy &
+          sleep 1
+          curl --socks5 127.0.0.1:1080 -sI https://example.com | tee /tmp/out.txt
+          grep -q "HTTP/" /tmp/out.txt
+      - name: CLI smoke test
+        run: |
+          ./dpi-proxy --version
+          ./dpi-proxy --capabilities
+          ./dpi-proxy --help >/dev/null
+
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make sanitize
+
+  packet-mode-compile:
+    # Real compile+link against real system dev headers, unlike the
+    # vendored-package fallback documented in the README for
+    # environments without root. GitHub-hosted runners have real
+    # sudo, so this is the one place that verification can happen
+    # automatically. Deliberately does NOT attempt to apply nftables
+    # rules or bind a live NFQUEUE here — that needs a kernel/runner
+    # combination nobody has confirmed supports it reliably in CI;
+    # live runs use scripts/field-test-linux.sh on a real machine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libnetfilter-queue-dev nftables
+      - run: make packet-mode
+      - name: capability report (read-only, no privileged action taken)
+        run: ./dpi-proxy-packet --capabilities
+
+  sanitize-then-packet-mode:
+    # Regression test for a real bug: `make sanitize` leaves ASan/UBSan-
+    # instrumented .o files for $(PACKET_OBJ) in the tree, and
+    # `make packet-mode` used to relink them as-is (make's mtime
+    # check saw no source change), producing undefined __asan_*/
+    # __ubsan_* references at link time. `packet-mode` now forces
+    # `make clean` first; this job runs the two targets back-to-back
+    # in one workspace, which is what exposes the bug if it recurs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libnetfilter-queue-dev nftables
+      - run: make sanitize
+      - run: make packet-mode
+      - run: ./dpi-proxy-packet --capabilities
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make re
+      - name: smoke test
+        run: |
+          ./dpi-proxy &
+          sleep 1
+          curl --socks5 127.0.0.1:1080 -sI https://example.com | tee /tmp/out.txt
+          grep -q "HTTP/" /tmp/out.txt
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make curl
+      - run: make windows CC_WIN=gcc
+      - name: smoke test
+        run: |
+          ./dpi-proxy.exe &
+          sleep 1
+          curl --socks5 127.0.0.1:1080 -sI https://example.com | tee /tmp/out.txt
+          grep -q "HTTP/" /tmp/out.txt

@@ -1,0 +1,13 @@
+[Unit]
+Description=dpi-proxy general-purpose SOCKS5 proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dpi-proxy
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - run: make re
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpi-proxy-linux-x86_64
+          path: dpi-proxy
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make re
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpi-proxy-macos-arm64
+          path: dpi-proxy
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+      - run: make windows CC_WIN=gcc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpi-proxy-windows-x86_64
+          path: dpi-proxy.exe
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: package
+        run: |
+          mkdir -p release
+          cp dist/dpi-proxy-linux-x86_64/dpi-proxy release/dpi-proxy-linux-x86_64
+          cp dist/dpi-proxy-macos-arm64/dpi-proxy release/dpi-proxy-macos-arm64
+          cp dist/dpi-proxy-windows-x86_64/dpi-proxy.exe release/dpi-proxy-windows-x86_64.exe
+          chmod +x release/dpi-proxy-linux-x86_64 release/dpi-proxy-macos-arm64
+          (cd release && sha256sum dpi-proxy-linux-x86_64 dpi-proxy-macos-arm64 dpi-proxy-windows-x86_64.exe > SHA256SUMS)
+      # The only place a release is created: notes come from
+      # .github/release-notes/<tag>.md when present.
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=".github/release-notes/${{ github.ref_name }}.md"
+          if [ -f "$notes" ]; then
+            set -- --notes-file "$notes"
+          else
+            set -- --generate-notes
+          fi
+          gh release create "${{ github.ref_name }}" \
+            release/dpi-proxy-linux-x86_64 \
+            release/dpi-proxy-macos-arm64 \
+            release/dpi-proxy-windows-x86_64.exe \
+            release/SHA256SUMS \
+            --title "dpi-for-everyone ${{ github.ref_name }}" \
+            "$@"

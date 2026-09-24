@@ -1,0 +1,44 @@
+[Unit]
+Description=dpi-proxy packet-mode DPI-evasion engine (system-wide, Linux NFQUEUE)
+Documentation=https://github.com/kadireren7/dpi-for-everyone
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dpi-proxy-packet
+# SIGHUP re-reads strategy.conf and the discovery cache in place (see
+# reload_strategies() in nfqueue_engine.c).
+ExecReload=/bin/kill -HUP $MAINPID
+Environment=DPI_PROXY_STRATEGY_CONF=/etc/dpi-proxy/strategy.conf
+Environment=DPI_PROXY_DISCOVERY_CACHE=/etc/dpi-proxy/discovery-cache.conf
+Environment=DPI_PROXY_LOG_LEVEL=info
+Restart=on-failure
+RestartSec=2
+
+# Privilege model: runs as root (UID 0), but CapabilityBoundingSet
+# strips every capability except the two the engine actually uses —
+# CAP_NET_ADMIN (nftables rule management, NFQUEUE bind) and
+# CAP_NET_RAW (raw-socket packet reinjection for SPLIT). Even though
+# the process is UID 0, it can never exercise any capability outside
+# this set — including, notably, CAP_DAC_OVERRIDE, so normal file
+# permission checks still apply to it. AmbientCapabilities makes
+# those two capabilities available in the started process's
+# permitted/effective sets; NoNewPrivileges blocks gaining anything
+# beyond this via exec. Verified against the real binary: nftables
+# rule install/removal and the raw v4 socket both work under this
+# exact set (verified live).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Cleanup contract: SIGTERM (systemctl stop/restart, or shutdown)
+# reaches the engine's own signal handler, which removes the
+# dedicated `inet dpi_proxy` nftables table before exiting — see
+# nfqueue_engine.c. Give it a real window before systemd escalates
+# to SIGKILL, which would skip that cleanup.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
