@@ -113,10 +113,10 @@ try {
     }
 
     Log '[5/6] Creating and starting the service...'
-    & sc.exe create $Service binPath= "`"$exe`" --service" start= auto `
-        DisplayName= 'dpi-proxy (automatic DPI bypass)' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed ($LASTEXITCODE)" }
-    & sc.exe description $Service 'Redirects outgoing HTTPS and DNS to a local DPI-bypass proxy (WinDivert). Stopping it restores ordinary networking.' | Out-Null
+    # New-Service, not sc.exe: PowerShell would mangle the quoted path
+    New-Service -Name $Service -BinaryPathName "`"$exe`" --service" `
+        -StartupType Automatic -DisplayName 'dpi-proxy (automatic DPI bypass)' `
+        -Description 'Redirects outgoing HTTPS and DNS to a local DPI-bypass proxy (WinDivert). Stopping it restores ordinary networking.' | Out-Null
     & sc.exe failure $Service reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null
     Remove-Item $StatusFile -ErrorAction SilentlyContinue
     Start-Service $Service
