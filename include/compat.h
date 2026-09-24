@@ -33,6 +33,9 @@ int		compat_close(int fd);
 int		compat_set_nonblocking(int fd, int on);
 /* After a non-blocking connect() returned -1: still in progress? */
 int		compat_connect_pending(void);
+/* The last connect() failed because the local address/port (or the
+ * whole 4-tuple, e.g. still in TIME_WAIT) is in use. */
+int		compat_addr_in_use(void);
 /* The last socket call failed only because it was interrupted. */
 int		compat_interrupted(void);
 int		compat_so_error(int fd);

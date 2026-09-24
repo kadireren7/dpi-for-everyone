@@ -458,6 +458,10 @@ static VOID WINAPI	on_route_change(PVOID ctx,
 
 int	tpp_init(void)
 {
+	/* a restarted service must not reuse the local ports (and so the
+	 * 4-tuples, possibly still in TIME_WAIT) its predecessor just used */
+	g_own_next = (LONG)((GetTickCount64() ^ ((uint64_t)GetCurrentProcessId()
+					* 2654435761u)) % (OWN_PORT_HI - OWN_PORT_LO + 1));
 	notify_setup();
 	if (g_notify_tx >= 0)
 		NotifyRouteChange2(AF_UNSPEC, on_route_change, NULL, FALSE,

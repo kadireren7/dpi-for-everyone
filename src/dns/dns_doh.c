@@ -208,6 +208,7 @@ static int	connect_fd(const t_dns_doh *d, const t_doh_server *s,
 	int64_t deadline)
 {
 	int		fd;
+	int		busy;
 	int64_t	left;
 
 	fd = (int)socket(s->addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -223,8 +224,9 @@ static int	connect_fd(const t_dns_doh *d, const t_doh_server *s,
 	if (connect(fd, (const struct sockaddr *)&s->addr, s->addr_len) < 0
 		&& !compat_connect_pending())
 	{
+		busy = compat_addr_in_use();
 		compat_close(fd);
-		return (-1);
+		return (busy ? -2 : -1);
 	}
 	left = deadline - now_ms();
 	if (left <= 0 || compat_wait(fd, POLLOUT, (int)left) <= 0
@@ -242,9 +244,14 @@ static t_doh_conn	*conn_open(t_dns_doh *d, t_doh_server *s, int64_t deadline)
 {
 	t_doh_conn		*c;
 	int				fd;
+	int				tries;
 	t_tlsc_result	r;
 
-	fd = connect_fd(d, s, deadline);
+	/* -2: local port in use (Windows: our port range): new socket */
+	tries = 0;
+	do
+		fd = connect_fd(d, s, deadline);
+	while (fd == -2 && ++tries < 8);
 	if (fd < 0)
 		return (NULL);
 	c = calloc(1, sizeof(*c));
