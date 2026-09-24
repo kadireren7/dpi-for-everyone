@@ -20,6 +20,14 @@ jobs:
           name: dpi-proxy-linux-x86_64
           path: dpi-proxy
 
+  # Linux transparent mode must still pass its real end-to-end cycle
+  linux-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev nftables
+      - run: ./scripts/e2e-test-linux.sh
+
   macos:
     runs-on: macos-latest
     steps:
@@ -57,7 +65,9 @@ jobs:
           path: dpi-proxy-windows-x86_64.zip
 
   publish:
-    needs: [linux, macos, windows]
+    # nothing is published unless every build and both end-to-end
+    # tests (Linux, Windows) passed
+    needs: [linux, linux-e2e, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,6 +94,10 @@ jobs:
           else
             set -- --generate-notes
           fi
+          # v1.2.3-rc1, -beta...: a pre-release, never "Latest"
+          case "${{ github.ref_name }}" in
+            *-*) set -- "$@" --prerelease --latest=false ;;
+          esac
           gh release create "${{ github.ref_name }}" \
             release/dpi-proxy-linux-x86_64 \
             release/dpi-proxy-macos-arm64 \

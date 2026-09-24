@@ -12,7 +12,7 @@
   Installs (and scripts\windows\uninstall.ps1 removes exactly that):
     %ProgramFiles%\dpi-proxy\   dpi-proxy.exe, WinDivert.dll,
                                 WinDivert64.sys, WinDivert-LICENSE.txt,
-                                dpi-proxy-ctl.ps1/.cmd, uninstall.ps1
+                                dpi-proxy-ctl.cmd (+ -impl.ps1), uninstall.ps1
     %ProgramData%\dpi-proxy\    strategy.conf (kept on reinstall),
                                 learned decisions, status, log
     service "dpi-proxy"         automatic start, restart on failure
@@ -81,7 +81,7 @@ try {
     foreach ($f in 'WinDivert-LICENSE.txt') {
         if (Test-Path (Join-Path $from $f)) { Copy-Item (Join-Path $from $f) $InstDir -Force }
     }
-    foreach ($f in 'dpi-proxy-ctl.ps1', 'dpi-proxy-ctl.cmd', 'uninstall.ps1') {
+    foreach ($f in 'dpi-proxy-ctl-impl.ps1', 'dpi-proxy-ctl.cmd', 'uninstall.ps1') {
         $p = Join-Path $Src $f
         if (-not (Test-Path $p)) { $p = Join-Path $from "scripts\windows\$f" }
         Copy-Item $p $InstDir -Force
@@ -150,7 +150,7 @@ Log 'Done. dpi-proxy is running and starts automatically at boot.'
 Write-Host '  HTTPS and DNS from all applications now go through the automatic'
 Write-Host '  bypass; no browser/app proxy settings and no DNS changes are needed.'
 Write-Host ''
-Write-Host '  Status:     dpi-proxy-ctl status        (open a new terminal first)'
+Write-Host '  Status:     .\dpi-proxy-ctl status      (in a new window: dpi-proxy-ctl status)'
 Write-Host '  Logs:       dpi-proxy-ctl logs'
 Write-Host '  Stop:       dpi-proxy-ctl stop          (networking keeps working, unbypassed)'
 Write-Host "  Uninstall:  powershell -ExecutionPolicy Bypass -File `"$InstDir\uninstall.ps1`""

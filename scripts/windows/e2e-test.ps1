@@ -111,11 +111,16 @@ Pass "killed: HTTPS still $c; restarted automatically; HTTPS $c2"
 
 Step 'dpi-proxy-ctl'
 $ctl = Join-Path $InstDir 'dpi-proxy-ctl.cmd'
-$out = (& $ctl status 2>&1 | Out-String)
+# as a user would: a new PowerShell (fresh machine PATH), plain command
+# name, under the default client execution policy (Restricted)
+$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command 'dpi-proxy-ctl status' 2>&1 | Out-String)
 Write-Host $out
 if ($LASTEXITCODE -ne 0 -or $out -notmatch 'engine:\s+running' -or $out -notmatch 'bypassed:') {
-    Die 'dpi-proxy-ctl status did not report a running engine'
+    Die 'dpi-proxy-ctl status (by name, Restricted policy) did not report a running engine'
 }
+$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command "Set-Location '$Package'; .\dpi-proxy-ctl status" 2>&1 | Out-String)
+if ($out -notmatch 'engine:\s+running') { Die '.\dpi-proxy-ctl status from the package folder failed' }
 $out = (& $ctl diagnose example.com 2>&1 | Out-String)
 Write-Host $out
 if ($LASTEXITCODE -ne 0 -or $out -notmatch 'https:\s+HTTP \d+') { Die 'dpi-proxy-ctl diagnose failed' }
@@ -125,10 +130,12 @@ if ($LASTEXITCODE -ne 0 -or $out -notmatch 'transparent mode:') { Die 'dpi-proxy
 Pass 'ctl status/diagnose/logs report correctly'
 
 Step 'uninstall cleans only our own state'
-& powershell -ExecutionPolicy Bypass -File (Join-Path $InstDir 'uninstall.ps1') -Purge
+# as documented: the uninstall.ps1 from the extracted package folder
+& powershell -ExecutionPolicy Bypass -File (Join-Path $Package 'uninstall.ps1') -Purge
 Start-Sleep -Seconds 3
 if (Get-Service dpi-proxy -ErrorAction SilentlyContinue) { Die 'service still present' }
 if (Get-NetFirewallRule -Name dpi-proxy -ErrorAction SilentlyContinue) { Die 'firewall rule still present' }
+if (Test-Path $InstDir) { Die "$InstDir still present" }
 if (Test-Path $DataDir) { Die "$DataDir still present after -Purge" }
 if (([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') -contains $InstDir) { Die 'PATH entry still present' }
 $c = Fetch 'https://example.com/'
