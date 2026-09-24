@@ -117,3 +117,9 @@ jobs:
       - name: transparent mode end-to-end (real WinDivert, Administrator)
         shell: pwsh
         run: ./scripts/windows/e2e-test.ps1 -Package dist
+      # the exact folder that was just tested, for trying it on a real
+      # machine before a release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpi-proxy-windows-x86_64
+          path: dist
