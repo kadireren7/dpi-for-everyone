@@ -1,3 +1,2 @@
 @echo off
-rem Compatibility alias for dpictl.cmd (the primary CLI as of v2.0).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dpictl-impl.ps1" %*

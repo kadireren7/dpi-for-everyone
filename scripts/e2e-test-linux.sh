@@ -82,10 +82,34 @@ sleep 3
 c="$(fetch https://example.com/)"; ok "$c" || die "after restart -> '$c'"
 pass "killed: fail-open, restarted, HTTPS $c"
 
-stepn "dpi-proxy-ctl"
+stepn "dpictl"
+dpictl status
+dpictl status --verbose
+dpictl diagnose example.com
+dpictl version | grep -q . || die "dpictl version printed nothing"
+dpictl doctor || die "dpictl doctor reported a failure while the service is healthy"
+bundle="$(mktemp -u).tar.gz"
+dpictl support-bundle "$bundle" || die "support-bundle failed"
+[ -s "$bundle" ] || die "support-bundle produced an empty/missing archive"
+tar -tzf "$bundle" | grep -q '^version.txt$' || die "support-bundle archive missing version.txt"
+bundle_dir="$(mktemp -d)"
+tar -xzf "$bundle" -C "$bundle_dir"
+if grep -rl "$HOME" "$bundle_dir" >/dev/null 2>&1; then
+	die "support-bundle leaked \$HOME ($HOME) into the archive"
+fi
+if grep -rlE '(^|[^a-zA-Z0-9_])'"$USER"'([^a-zA-Z0-9_]|$)' "$bundle_dir" >/dev/null 2>&1; then
+	die "support-bundle leaked the username ($USER) into the archive"
+fi
+[ -f "$bundle_dir/dns-history-summary.txt" ] || die "support-bundle missing dns-history-summary.txt"
+grep -q "raw per-domain/per-IP records are not included" "$bundle_dir/dns-history-summary.txt" \
+	|| die "support-bundle included raw DNS decision history instead of a summary"
+rm -rf "$bundle_dir" "$bundle"
+pass "dpictl status/doctor/support-bundle/version ran; archive redaction verified"
+
+stepn "dpi-proxy-ctl (compatibility alias)"
 dpi-proxy-ctl status
 dpi-proxy-ctl diagnose example.com
-pass "ctl ran"
+pass "alias still works"
 
 stepn "uninstall cleans only our own state"
 sudo "$ROOT/scripts/uninstall.sh" --purge

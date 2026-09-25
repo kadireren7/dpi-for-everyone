@@ -13,7 +13,7 @@ PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
 
 SERVICES="dpi-proxy-transparent dpi-proxy-packet"
-BINS="/usr/local/bin/dpi-proxy /usr/local/bin/dpi-proxy-packet /usr/local/bin/dpi-proxy-ctl"
+BINS="/usr/local/bin/dpi-proxy /usr/local/bin/dpi-proxy-packet /usr/local/bin/dpictl /usr/local/bin/dpi-proxy-ctl"
 UNIT_DIR="/etc/systemd/system"
 CONF_DIR="/etc/dpi-proxy"
 STATE_DIR="/var/lib/dpi-proxy"

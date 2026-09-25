@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:?usage: package.sh <out-dir>}"
 mkdir -p "$OUT"
 install -m 755 "$ROOT/dpi-proxy" "$OUT/dpi-proxy"
-for f in install.sh uninstall.sh dpi-proxy-ctl; do
+for f in install.sh uninstall.sh Install.command Uninstall.command dpictl dpi-proxy-ctl; do
 	install -m 755 "$ROOT/scripts/macos/$f" "$OUT/$f"
 done
 install -m 644 "$ROOT/scripts/macos/io.github.kadireren7.dpi-proxy.plist" "$OUT/"

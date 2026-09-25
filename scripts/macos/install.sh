@@ -30,7 +30,7 @@ die() { fail "$1"; exit 1; }
 
 [ "$(uname -s)" = Darwin ] || die "this installer is for macOS"
 [ "$(id -u)" -eq 0 ] || die "run it with sudo:  sudo ./install.sh"
-for f in dpi-proxy dpi-proxy-ctl "$LABEL.plist"; do
+for f in dpi-proxy dpictl dpi-proxy-ctl "$LABEL.plist"; do
 	[ -f "$HERE/$f" ] || die "$f is missing next to install.sh (extract the whole package)"
 done
 
@@ -78,6 +78,7 @@ if [ -n "$created" ]; then
 	for d in $created; do echo "$d"; done >>"$VAR_DIR/created-dirs"
 fi
 install -m 755 -o root -g wheel "$HERE/dpi-proxy" "$BIN_DIR/dpi-proxy"
+install -m 755 -o root -g wheel "$HERE/dpictl" "$BIN_DIR/dpictl"
 install -m 755 -o root -g wheel "$HERE/dpi-proxy-ctl" "$BIN_DIR/dpi-proxy-ctl"
 if [ ! -f "$ETC_DIR/strategy.conf" ]; then
 	cat >"$ETC_DIR/strategy.conf" <<'CONF'
@@ -95,7 +96,7 @@ CONF
 fi
 install -m 644 -o root -g wheel "$HERE/$LABEL.plist" "$PLIST"
 plutil -lint "$PLIST" >/dev/null || die "$PLIST is not a valid property list"
-echo "    $BIN_DIR/dpi-proxy, $BIN_DIR/dpi-proxy-ctl, $PLIST, $ETC_DIR/"
+echo "    $BIN_DIR/dpi-proxy, $BIN_DIR/dpictl, $PLIST, $ETC_DIR/"
 
 log "[4/5] Starting the service..."
 rm -f "$STATUS_FILE"
@@ -145,10 +146,12 @@ log "Done. dpi-proxy is running and starts automatically at boot."
 echo "    HTTPS and DNS from all applications now go through the automatic"
 echo "    bypass; no proxy settings, no DNS changes, no per-app setup."
 echo
-echo "    Status:     dpi-proxy-ctl status"
-echo "    Problems:   dpi-proxy-ctl diagnose discord.com   and   dpi-proxy-ctl logs"
-echo "    Stop:       sudo dpi-proxy-ctl stop     (networking keeps working, unbypassed)"
+echo "    Status:     dpictl status"
+echo "    Doctor:     dpictl doctor"
+echo "    Problems:   dpictl diagnose discord.com   and   dpictl logs"
+echo "    Stop:       sudo dpictl stop     (networking keeps working, unbypassed)"
 echo "    Uninstall:  sudo ./uninstall.sh         (in this folder)"
+echo "    (dpi-proxy-ctl still works as an alias for dpictl)"
 c="$(field conflict)"
 if [ -n "$c" ] && [ "$c" != none ]; then
 	echo
