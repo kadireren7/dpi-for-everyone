@@ -21,6 +21,22 @@ from and the ways to actually *see* it.
   `ioctl(SIOCGIFADDR)` on a throwaway local socket; no packet is ever
   sent to determine it.
 
+Two more signals feed `netfingerprint_current()`'s hash directly
+(they're not part of `t_net_profile`, since they're not meaningful to
+show a user, only to tell networks apart):
+
+- the **default gateway's address**, from the same `/proc/net/route`
+  read as the interface above;
+- the **default gateway's MAC address**, read from `/proc/net/arp` —
+  the kernel's own ARP/neighbor table; nothing is sent to determine
+  it, and it's simply omitted if the gateway has no resolved ARP entry
+  yet (e.g. right after boot). This is what tells apart two different
+  networks that happen to hand out the same private gateway IP
+  (192.168.1.1 is extremely common, and so are phone-hotspot
+  defaults) when there's no SSID to fall back on — plain ethernet, or
+  Wi-Fi without `nmcli` installed. Windows and macOS fold their
+  gateway's MAC into their own fingerprints the same way.
+
 All of the above feed `netfingerprint_current()`'s hash, which is what
 actually scopes the discovery cache (switching networks — new Wi-Fi, Ethernet vs. Wi-Fi, a VPN taking the
 default route — changes the fingerprint, which makes every cached

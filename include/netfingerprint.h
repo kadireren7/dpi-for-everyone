@@ -76,11 +76,24 @@ void		netprofile_describe(const t_net_profile *profile, char *buf,
 				size_t buf_size);
 
 /* FNV-1a hash of every t_net_profile signal (iface, link type, SSID,
- * IPv4/IPv6 default-route availability, local address) plus the
- * default gateway address — richer than just iface+gateway,
- * so e.g. two Wi-Fi networks sharing the same private gateway IP
- * (192.168.1.1 is extremely common) are still told apart by SSID.
- * Returns NETFP_UNKNOWN if no default route can be read at all. */
+ * IPv4/IPv6 default-route availability) plus the default gateway
+ * address and, when resolved, the gateway's MAC — so two networks
+ * sharing the same private gateway IP (192.168.1.1 is extremely
+ * common; so are phone-hotspot defaults) are told apart even when
+ * SSID can't help (plain ethernet, or Wi-Fi without `nmcli`), the
+ * same technique platform_windows.c (GetIpNetEntry2) and
+ * platform_macos.c (gateway_mac(), RTF_LLINFO) already use. Returns
+ * NETFP_UNKNOWN if no default route can be read at all. */
 uint64_t	netfingerprint_current(void);
+
+/* The pure combination step behind netfingerprint_current(): no I/O,
+ * so tests can exercise the "same gateway IP, different MAC must not
+ * collide" property with synthetic inputs instead of needing two real
+ * physical networks. `gw_mac` is ignored unless `has_gw_mac` is set
+ * (the gateway's ARP entry may not be resolved yet, e.g. right after
+ * boot — that must still produce a valid, if less specific,
+ * fingerprint, never NETFP_UNKNOWN and never a crash). */
+uint64_t	netfingerprint_hash(const t_net_profile *profile,
+				uint32_t gw_raw, const uint8_t *gw_mac, int has_gw_mac);
 
 #endif
