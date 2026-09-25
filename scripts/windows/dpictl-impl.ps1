@@ -335,7 +335,12 @@ function Invoke-SupportBundle([string]$OutFile) {
 
 switch ($Command) {
     'status' {
-        if ($Arg -eq '--verbose' -or $Arg -eq '-v') { Show-StatusVerbose } else { Show-StatusShort }
+        # dpictl.cmd sets DPICTL_VERBOSE=1 when it sees --verbose/-v
+        # among the raw arguments (see that file for why: PowerShell's
+        # own parameter binder cannot be trusted to hand a bare
+        # dash-prefixed token to $Arg intact through -File). $Arg is
+        # also checked directly for anyone invoking this script itself.
+        if ($env:DPICTL_VERBOSE -eq '1' -or $Arg -eq '--verbose' -or $Arg -eq '-v') { Show-StatusVerbose } else { Show-StatusShort }
     }
     'start'    { Start-Service $Service; Show-StatusVerbose }
     'stop'     { Stop-Service $Service; Write-Host 'stopped; networking is back to normal (unbypassed)' }

@@ -91,9 +91,9 @@ dpictl doctor || die "dpictl doctor reported a failure while the service is heal
 bundle="$(mktemp -u).tar.gz"
 dpictl support-bundle "$bundle" || die "support-bundle failed"
 [ -s "$bundle" ] || die "support-bundle produced an empty/missing archive"
-tar -tzf "$bundle" | grep -q '^version.txt$' || die "support-bundle archive missing version.txt"
 bundle_dir="$(mktemp -d)"
 tar -xzf "$bundle" -C "$bundle_dir"
+[ -f "$bundle_dir/version.txt" ] || die "support-bundle archive missing version.txt"
 if grep -rl "$HOME" "$bundle_dir" >/dev/null 2>&1; then
 	die "support-bundle leaked \$HOME ($HOME) into the archive"
 fi
