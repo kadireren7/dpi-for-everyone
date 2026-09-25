@@ -1,10 +1,10 @@
 # dpi-for-everyone
 
 `dpi-proxy` gets HTTPS traffic past SNI-based DPI (deep packet
-inspection) filtering. On Linux (and, in beta, on Windows) it runs as a
-system service: after one install command, blocked sites and apps work
-in every browser and application, with **no proxy settings and no DNS
-changes**. On macOS it is a local SOCKS5 proxy for now.
+inspection) filtering. On Linux (and, in beta, on Windows and macOS) it
+runs as a system service: after one install command, blocked sites and
+apps work in every browser and application, with **no proxy settings
+and no DNS changes**.
 
 It runs entirely on your own machine. It is not a VPN, it does not
 tunnel through a remote server, and it never decrypts or
@@ -16,7 +16,7 @@ man-in-the-middles TLS.
 |---|---|---|
 | Linux | **Transparent automatic mode** | Real ISP/DPI field-tested |
 | Windows 10/11 (x64) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real Windows GitHub runners with the real WinDivert driver; **real ISP/DPI field validation still pending** |
-| macOS | SOCKS5 proxy only, for now | — |
+| macOS (Apple silicon, Intel) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real macOS GitHub runners (macOS 14, 15 and 26 on Apple silicon, macOS 15 on Intel) with real PF and launchd; **not yet tested on a physical Mac or against real ISP DPI** |
 
 `dpi-proxy --capabilities` prints what the binary you have supports.
 
@@ -164,25 +164,73 @@ service, and stops the moment the service stops or crashes (fail-open).
 Windows Defender or other antivirus software may warn about it because
 DPI tools use it.
 
-## macOS
+## macOS (Beta)
 
-SOCKS5 proxy only — no system-wide interception, no DNS protection.
-Download the binary from the
-[latest release](https://github.com/kadireren7/dpi-for-everyone/releases/latest):
+macOS transparent mode works the same way as on Linux: the built-in
+macOS packet filter (PF) sends this Mac's HTTPS and DNS to the local
+`dpi-proxy` service. It passes the full automated end-to-end test on
+real macOS machines, but it has **not yet been tested on a physical Mac
+or against real ISP DPI**. Field reports are welcome.
+
+### Quick start
+
+1. Download **`dpi-proxy-macos-arm64.zip`** (Apple silicon: M1/M2/M3/…)
+   or **`dpi-proxy-macos-x86_64.zip`** (Intel Macs) from
+   [Releases](https://github.com/kadireren7/dpi-for-everyone/releases)
+   (v1.2.0-rc1 or newer) and double-click it to extract it.
+2. Open **Terminal** in the extracted folder and install:
+
+   ```sh
+   cd ~/Downloads/dpi-proxy-macos-arm64
+   sudo ./install.sh
+   ```
+
+3. Check it: `dpi-proxy-ctl status` — you should see `engine: running`.
+4. Use Safari, Chrome, Firefox, Discord, … normally. No proxy settings,
+   no manual DNS changes, no per-app configuration.
+
+The ZIP contains everything (`dpi-proxy`, `dpi-proxy-ctl`,
+`install.sh`, `uninstall.sh`, the launchd job, LICENSE,
+`MACOS-QUICKSTART.txt`); no Xcode, Homebrew, Git or Python is needed.
+Before testing, quit SpoofDPI, ByeDPI, zapret and VPN apps that filter
+traffic.
+
+### Commands
 
 ```sh
-# macOS (Apple silicon)
-curl -fsSL "https://github.com/kadireren7/dpi-for-everyone/releases/latest/download/dpi-proxy-macos-arm64" -o dpi-proxy && chmod +x dpi-proxy
-DPI_PROXY_SPLIT_TLS=record ./dpi-proxy
+dpi-proxy-ctl status
+dpi-proxy-ctl diagnose discord.com   # DNS + HTTPS check for one site
+dpi-proxy-ctl logs 50
+sudo dpi-proxy-ctl stop              # normal internet, no bypass (until start/reboot)
+sudo dpi-proxy-ctl start
+sudo dpi-proxy-ctl restart
 ```
 
-It listens on `127.0.0.1:1080`; point an application's SOCKS5 setting
-there. Without `DPI_PROXY_SPLIT_TLS=record` it relays traffic
-unmodified. Names are resolved with the system resolver, so if your
-network poisons DNS you also need to set a trustworthy DNS server
-yourself. Stop it with `Ctrl+C`; remove it by deleting the file. (The
-Windows `dpi-proxy.exe` can run the same way: `dpi-proxy.exe` without
-arguments is a SOCKS5 proxy.)
+Files: `/usr/local/bin/dpi-proxy`, `/usr/local/bin/dpi-proxy-ctl`,
+`/Library/LaunchDaemons/io.github.kadireren7.dpi-proxy.plist`,
+`/usr/local/etc/dpi-proxy/strategy.conf`, log `/var/log/dpi-proxy.log`.
+
+### Uninstall
+
+In the extracted folder: `sudo ./uninstall.sh`. It removes the service,
+the programs, settings, learned decisions, logs and dpi-proxy's PF
+rules, and releases its PF reference; PF, `/etc/pf.conf` and every
+other rule are left exactly as they were.
+
+### How it touches the system
+
+All rules live in dpi-proxy's own PF anchor (`com.apple/dpi-proxy`);
+`/etc/pf.conf` is never edited and other PF rules are never touched.
+If the service stops, crashes or hangs, a watchdog process removes the
+rules (immediately, or within 30 seconds for a hang), so the internet
+keeps working, just unbypassed. Details:
+[docs/transparent-mode.md](docs/transparent-mode.md#macos).
+
+### SOCKS5 mode
+
+`dpi-proxy` run without arguments is still a plain local SOCKS5 proxy on
+`127.0.0.1:1080` (`DPI_PROXY_SPLIT_TLS=record ./dpi-proxy` for the
+bypass), on every platform.
 
 ## Limitations
 
@@ -206,11 +254,19 @@ arguments is a SOCKS5 proxy.)
   All traffic to port 443 passes through the service in user space,
   which costs some throughput compared to Linux; performance on
   consumer machines is still to be measured.
+- **macOS (Beta):** not yet tested on a physical Mac or against real
+  ISP DPI (CI machines are virtual machines on Apple hardware). DNS
+  servers with IPv6 link-local addresses (`fe80::…`) are not
+  intercepted; if a network hands out only such a resolver, names are
+  resolved by it unprotected. A custom `/etc/pf.conf` without Apple's
+  `com.apple/*` anchor hooks is not supported (the service says so and
+  does not start).
 
 ## Documentation
 
-- [docs/transparent-mode.md](docs/transparent-mode.md) — how the Linux
-  engine works: DNS, the decision ladder, fail-open, operation.
+- [docs/transparent-mode.md](docs/transparent-mode.md) — how the
+  engine works (Linux, Windows, macOS): DNS, the decision ladder,
+  fail-open, operation.
 - [docs/development.md](docs/development.md) — building, tests,
   sanitizers, CI.
 - [docs/packet-mode.md](docs/packet-mode.md),

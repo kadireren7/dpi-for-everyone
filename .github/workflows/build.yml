@@ -66,16 +66,82 @@ jobs:
       - run: ./dpi-proxy-packet --capabilities
 
   macos:
-    runs-on: macos-latest
+    # Release-grade build (static OpenSSL, macOS >= 11), unit tests
+    # plain and under ASan/UBSan, the test package as a tester gets it.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
-      - run: make re
-      - name: smoke test
+      - run: echo "SSL=$RUNNER_TEMP/openssl-${{ matrix.arch }}" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openssl-${{ matrix.arch }}
+          key: openssl-3.5.8-${{ matrix.arch }}-macos11-v1
+      - name: static OpenSSL 3.5.8 (pinned SHA-256)
+        run: ./scripts/macos/build-openssl.sh "$SSL" ${{ matrix.arch }}
+      - run: make clean && make all OPENSSL_PREFIX="$SSL" OPENSSL_STATIC=1
+      - run: make test OPENSSL_PREFIX="$SSL"
+      - run: make sanitize OPENSSL_PREFIX="$SSL"
+      # sanitize cleaned the tree: the packaged binary is a fresh plain build
+      - run: make clean && make all OPENSSL_PREFIX="$SSL" OPENSSL_STATIC=1
+      - name: binary checks
+        run: |
+          ./dpi-proxy --version
+          ./dpi-proxy --capabilities | tee /tmp/cap.txt
+          grep -q '^transparent_mode: supported' /tmp/cap.txt
+          file dpi-proxy | grep -q "${{ matrix.arch }}"
+          otool -L dpi-proxy
+          otool -l dpi-proxy | grep -A3 -E 'LC_BUILD_VERSION|LC_VERSION_MIN' | grep -E 'minos|version'
+          ./dpi-proxy --print-pf-rules
+      - name: SOCKS5 smoke test
         run: |
           ./dpi-proxy &
           sleep 1
           curl --socks5 127.0.0.1:1080 -sI https://example.com | tee /tmp/out.txt
           grep -q "HTTP/" /tmp/out.txt
+          kill %1 || true
+      - name: package
+        run: |
+          ./scripts/macos/package.sh dpi-proxy-macos-${{ matrix.arch }}
+          ditto -c -k --keepParent dpi-proxy-macos-${{ matrix.arch }} dpi-proxy-macos-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpi-proxy-macos-${{ matrix.arch }}
+          path: dpi-proxy-macos-${{ matrix.arch }}.zip
+
+  macos-e2e:
+    # The real thing on real macOS machines (root, PF, launchd): the
+    # zipped package installed as a tester would, then the whole
+    # lifecycle (scripts/macos/e2e-test.sh).
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, arch: arm64 }
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-26, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dpi-proxy-macos-${{ matrix.arch }}
+      - name: extract (as a tester would)
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          ditto -x -k dpi-proxy-macos-${{ matrix.arch }}.zip "$RUNNER_TEMP/pkg"
+          ls -l "$RUNNER_TEMP/pkg/dpi-proxy-macos-${{ matrix.arch }}"
+      - name: transparent mode end-to-end (PF, launchd, root)
+        run: ./scripts/macos/e2e-test.sh "$RUNNER_TEMP/pkg/dpi-proxy-macos-${{ matrix.arch }}"
 
   linux-e2e:
     # Real install -> intercept -> bypass -> stop -> crash -> uninstall

@@ -22,6 +22,11 @@ typedef WSAPOLLFD	t_pollfd;
 # else
 #  include <poll.h>
 typedef struct pollfd	t_pollfd;
+/* macOS has no SOCK_CLOEXEC; transparent mode spawns its helpers with
+ * POSIX_SPAWN_CLOEXEC_DEFAULT instead, so nothing leaks into them */
+#  ifndef SOCK_CLOEXEC
+#   define SOCK_CLOEXEC 0
+#  endif
 # endif
 
 int		compat_poll(t_pollfd *fds, size_t n, int timeout_ms);

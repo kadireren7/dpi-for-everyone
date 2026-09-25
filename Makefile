@@ -50,7 +50,8 @@ PACKET_SRC = \
 	src/dns/dns.c \
 	src/dns/dns_udp.c \
 	src/compat.c \
-	src/transparent/policy.c
+	src/transparent/policy.c \
+	src/transparent/pf_rules.c
 
 PACKET_OBJ = $(PACKET_SRC:.c=.o)
 
@@ -88,11 +89,41 @@ TP_SRC = \
 OPENSSL_CFLAGS ?= $(shell pkg-config --cflags openssl 2>/dev/null)
 OPENSSL_LIBS ?= $(shell pkg-config --libs openssl 2>/dev/null || echo -lssl -lcrypto)
 
-ifeq ($(shell uname -s),Linux)
+# macOS transparent mode (PF): the same shared modules, the PF
+# platform layer instead of nftables. macOS ships no OpenSSL headers,
+# so OpenSSL comes from OPENSSL_PREFIX: by default Homebrew's openssl@3
+# (linked dynamically — fine for development); release builds use
+# scripts/macos/build-openssl.sh and OPENSSL_STATIC=1, which links
+# libssl.a/libcrypto.a so the binary depends on nothing but macOS.
+MAC_TP_SRC = \
+	$(filter-out src/transparent/platform_linux.c \
+		src/discovery/netfingerprint.c, $(TP_SRC)) \
+	src/transparent/platform_macos.c \
+	src/transparent/pf_rules.c
+OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3 2>/dev/null)
+OPENSSL_STATIC ?=
+
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Linux)
 PROXY_SRC = $(SRC) $(TP_SRC)
 LDFLAGS += $(OPENSSL_LIBS)
 INCLUDES += $(OPENSSL_CFLAGS)
 CFLAGS += -DHAVE_TRANSPARENT
+else ifeq ($(UNAME_S),Darwin)
+ifneq ($(OPENSSL_PREFIX),)
+PROXY_SRC = $(SRC) $(MAC_TP_SRC)
+INCLUDES += -I$(OPENSSL_PREFIX)/include
+CFLAGS += -DHAVE_TRANSPARENT
+ifneq ($(OPENSSL_STATIC),)
+LDFLAGS += $(OPENSSL_PREFIX)/lib/libssl.a $(OPENSSL_PREFIX)/lib/libcrypto.a
+else
+LDFLAGS += -L$(OPENSSL_PREFIX)/lib -lssl -lcrypto
+endif
+else
+# no OpenSSL found: SOCKS5 proxy only
+PROXY_SRC = $(SRC)
+endif
 else
 PROXY_SRC = $(SRC)
 endif
@@ -175,7 +206,8 @@ packet-mode:
 clean:
 	rm -f $(wildcard src/*.d src/*/*.d)
 	rm -f tests/unit/*.exe $(WIN_TEST_OBJ)
-	rm -f $(OBJ) $(SRC:.c=.o) $(TP_SRC:.c=.o) $(WIN_OBJ) $(PACKET_OBJ) $(TEST_BIN) \
+	rm -f $(OBJ) $(SRC:.c=.o) $(TP_SRC:.c=.o) $(MAC_TP_SRC:.c=.o) \
+		$(WIN_OBJ) $(PACKET_OBJ) $(TEST_BIN) \
 		src/nfqueue/nfqueue_engine.o src/main_packet.o \
 		src/discovery/probe_runner.o
 
@@ -241,7 +273,8 @@ windows: $(WIN_OBJ)
 # Windows): the shared decision/DNS/TLS-parsing core.
 WIN_TESTS = test_dns test_transparent test_tls test_tls_record test_strategy
 WIN_TEST_OBJ = src/dns/dns.win.o src/dns/dns_udp.win.o src/compat.win.o \
-	src/transparent/policy.win.o src/strategy/strategy.win.o \
+	src/transparent/policy.win.o src/transparent/pf_rules.win.o \
+	src/strategy/strategy.win.o \
 	src/tls/sni_extract.win.o src/tls.win.o src/platform.win.o
 windows-tests: $(WIN_TEST_OBJ)
 	@for t in $(WIN_TESTS); do \

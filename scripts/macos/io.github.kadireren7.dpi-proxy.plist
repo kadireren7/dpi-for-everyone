@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dpi-proxy transparent mode (macOS, Beta), installed by install.sh as
+  /Library/LaunchDaemons/io.github.kadireren7.dpi-proxy.plist.
+  Starts at boot; restarted by launchd if it crashes. Stopping it
+  (dpi-proxy-ctl stop) removes its PF rules: networking goes back to
+  normal. Log: /var/log/dpi-proxy.log
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.kadireren7.dpi-proxy</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/dpi-proxy</string>
+		<string>--mode</string>
+		<string>transparent</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- restart after a crash or failed start, not after a clean stop -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<!-- the fail-open watchdog must outlive a crashed daemon -->
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<key>ExitTimeOut</key>
+	<integer>20</integer>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>8192</integer>
+	</dict>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>8192</integer>
+	</dict>
+	<!-- the daemon writes (and rotates) /var/log/dpi-proxy.log itself;
+	     this only catches output from before logging starts -->
+	<key>StandardErrorPath</key>
+	<string>/var/log/dpi-proxy.stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+</dict>
+</plist>

@@ -56,6 +56,19 @@ static int	load_system_roots(SSL_CTX *ctx)
 	return (n > 0 ? 0 : -1);
 }
 
+#elif defined(__APPLE__)
+
+/* The release build links its own OpenSSL, whose compiled-in default
+ * directory may not exist on the user's Mac: use the bundle macOS
+ * itself ships (and updates), then the defaults. */
+static int	load_system_roots(SSL_CTX *ctx)
+{
+	if (SSL_CTX_load_verify_locations(ctx, "/etc/ssl/cert.pem", NULL) == 1)
+		return (0);
+	ERR_clear_error();
+	return (SSL_CTX_set_default_verify_paths(ctx) == 1 ? 0 : -1);
+}
+
 #else
 
 static int	load_system_roots(SSL_CTX *ctx)

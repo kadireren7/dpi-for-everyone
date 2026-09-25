@@ -33,9 +33,20 @@ strategy config (with the offending line number), missing
 ## Building from source
 
 ```sh
-# Linux / macOS — portable SOCKS5 proxy
+# Linux — SOCKS5 proxy + transparent mode (needs libssl-dev)
+# macOS — the same, if OpenSSL is found (Homebrew's openssl@3 by
+#         default, or OPENSSL_PREFIX=...); otherwise SOCKS5 only
 make fclean && make
 ./dpi-proxy
+```
+
+```sh
+# macOS release build: static OpenSSL 3.5 LTS (SHA-256-pinned source),
+# binary depends on macOS system libraries only, runs on macOS >= 11
+export MACOSX_DEPLOYMENT_TARGET=11.0
+./scripts/macos/build-openssl.sh "$PWD/../openssl-$(uname -m)"
+make fclean && make OPENSSL_PREFIX="$PWD/../openssl-$(uname -m)" OPENSSL_STATIC=1
+./scripts/macos/package.sh dpi-proxy-macos-$(uname -m)   # the test package folder
 ```
 
 ```sh
@@ -75,9 +86,22 @@ the real `nft` success path.
 
 `.github/workflows/build.yml` runs on every push/PR:
 
-- `linux`, `macos`, `windows`: `make re` (or `make windows`) + a smoke
+- `linux`, `windows`: `make re` (or `make windows`) + a smoke
   test (SOCKS5 proxy against a real `curl` request) + `--version`/
   `--capabilities`/`--help` CLI checks.
+- `macos` (arm64 on macos-15, x86_64 on macos-15-intel): the release
+  build (static OpenSSL), `make test`, `make sanitize`, binary checks
+  (architecture, minimum macOS version, system-only libraries), SOCKS5
+  smoke test, and the zipped test package as an artifact.
+- `macos-e2e` (macOS 14, 15, 26 on Apple silicon; 15 on Intel): the
+  zipped package extracted and installed as a tester would, then
+  `scripts/macos/e2e-test.sh`: real PF interception, original
+  destination recovery, DoH, QUIC reject table, IPv6 (where the
+  runner has it), no loop, forced bypass, ctl, restart, stop, SIGKILL
+  and SIGSTOP fail-open, launchd restart, uninstall leaving nothing
+  behind, clean reinstall.
+- `linux-e2e`, and the Windows job's end-to-end step: the same
+  lifecycle for Linux and Windows.
 - `sanitize`: `make sanitize`.
 - `packet-mode-compile`: installs real `libnetfilter-queue-dev` +
   `nftables` via `sudo apt-get`, runs `make packet-mode`, and runs
@@ -91,12 +115,14 @@ the real `nft` success path.
 
 ## Release builds
 
-Prebuilt binaries (SOCKS5 proxy only — packet mode is Linux-only and
-needs root/capabilities, so it's a build-from-source thing, not a
-release artifact) are published on the
-[releases page](https://github.com/kadireren7/dpi-for-everyone/releases/latest)
-for each tag, named `dpi-proxy-linux-x86_64`, `dpi-proxy-macos-arm64`,
-and `dpi-proxy-windows-x86_64.exe`, alongside a `SHA256SUMS` file:
+Prebuilt releases (packet mode is Linux-only and needs
+root/capabilities, so it's a build-from-source thing, not a release
+artifact) are published on the
+[releases page](https://github.com/kadireren7/dpi-for-everyone/releases)
+for each tag: `dpi-proxy-linux-x86_64`, `dpi-proxy-windows-x86_64.zip`,
+and (from v1.2.0-rc1) `dpi-proxy-macos-arm64.zip` /
+`dpi-proxy-macos-x86_64.zip`, alongside a `SHA256SUMS` file. Every
+package is built only after it passed its platform's end-to-end test:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing

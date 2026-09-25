@@ -263,14 +263,15 @@ int	tpp_netwatch_fd(void)
 	return (g_netlink);
 }
 
-void	tpp_netwatch_drain(void)
+int	tpp_netwatch_drain(void)
 {
 	char	buf[8192];
 
 	if (g_netlink < 0)
-		return ;
+		return (0);
 	while (recv(g_netlink, buf, sizeof(buf), 0) > 0)
 		;
+	return (1);
 }
 
 uint64_t	tpp_network_fingerprint(void)
@@ -285,6 +286,24 @@ const char	*tpp_conflict(void)
 	if (nft_run(probe, strlen(probe), 1) == 0)
 		return ("dpi-bypass table active");
 	return (NULL);
+}
+
+int	tpp_dns_original(int fd, const struct sockaddr *peer, socklen_t peer_len,
+	int tcp, struct sockaddr_storage *out, socklen_t *out_len)
+{
+	(void)fd;
+	(void)peer;
+	(void)peer_len;
+	(void)tcp;
+	(void)out;
+	(void)out_len;
+	return (-1);
+}
+
+void	tpp_status_extra(char *out, size_t out_size)
+{
+	if (out_size > 0)
+		out[0] = '\0';
 }
 
 const char	*tpp_name(void)

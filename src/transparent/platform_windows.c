@@ -720,14 +720,15 @@ int	tpp_netwatch_fd(void)
 	return (g_notify_rx);
 }
 
-void	tpp_netwatch_drain(void)
+int	tpp_netwatch_drain(void)
 {
 	char	buf[64];
 
 	if (g_notify_rx < 0)
-		return ;
+		return (0);
 	while (recv((SOCKET)g_notify_rx, buf, sizeof(buf), 0) > 0)
 		;
+	return (1);
 }
 
 /* The default route's interface and gateway (and the gateway's MAC,
@@ -799,6 +800,24 @@ const char	*tpp_conflict(void)
 	}
 	CloseHandle(snap);
 	return (hit);
+}
+
+int	tpp_dns_original(int fd, const struct sockaddr *peer, socklen_t peer_len,
+	int tcp, struct sockaddr_storage *out, socklen_t *out_len)
+{
+	(void)fd;
+	(void)peer;
+	(void)peer_len;
+	(void)tcp;
+	(void)out;
+	(void)out_len;
+	return (-1);
+}
+
+void	tpp_status_extra(char *out, size_t out_size)
+{
+	if (out_size > 0)
+		out[0] = '\0';
 }
 
 const char	*tpp_name(void)

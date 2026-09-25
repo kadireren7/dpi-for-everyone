@@ -1,0 +1,50 @@
+dpi-for-everyone - macOS quick start (Beta)
+===========================================
+
+Built for macOS 11 or newer (tested on macOS 14, 15 and 26). Nothing
+to build or download besides this package: no Xcode, Homebrew, Git or
+Python needed. Apple silicon (M1/M2/M3/...): the -arm64 package;
+Intel Macs: the -x86_64 package.
+
+BEFORE YOU START
+  Quit other DPI tools (SpoofDPI, ByeDPI, zapret/tpws, GoodbyeDPI-like
+  apps) and VPN apps that filter traffic. Two such tools at once
+  interfere with each other.
+
+INSTALL
+  1. Extract the package (double-click the .zip file).
+  2. Open Terminal (Applications -> Utilities -> Terminal) and go to
+     the extracted folder, e.g.:
+         cd ~/Downloads/dpi-proxy-macos-arm64
+  3. Install (enter your Mac password when asked):
+         sudo ./install.sh
+  4. Check:
+         dpi-proxy-ctl status
+     You should see "engine: running".
+  5. Open Safari, Chrome, Firefox, Discord, ... normally. No proxy
+     settings, no DNS changes, nothing to configure in any app.
+
+IF SOMETHING FAILS
+         dpi-proxy-ctl diagnose discord.com
+         dpi-proxy-ctl logs
+  and send the output to whoever gave you this package.
+
+EVERYDAY COMMANDS
+         dpi-proxy-ctl status
+         sudo dpi-proxy-ctl stop       (normal internet, no bypass)
+         sudo dpi-proxy-ctl start
+         sudo dpi-proxy-ctl restart
+
+UNINSTALL (in the extracted folder)
+         sudo ./uninstall.sh
+  Removes everything: the service, the programs, settings, logs and
+  dpi-proxy's firewall (PF) rules.
+
+This is a beta: it passes a full automated test on macOS machines, but
+it has not yet been tested against real ISP DPI on a Mac. It is not a
+VPN and never decrypts traffic. How it works: it adds its own rules to
+the built-in macOS packet filter (PF) - in its own section, leaving
+everything else alone - so this Mac's HTTPS and DNS go through the
+local dpi-proxy service; when the service stops or crashes the rules
+are removed and the internet works as before.
+More: https://github.com/kadireren7/dpi-for-everyone

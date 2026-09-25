@@ -25,12 +25,32 @@
  * server answers, the client gets SERVFAIL (and retries). Queries the
  * platform layer did not redirect to us are ignored (tpp_dns_peer_ok;
  * matters where the listener is not loopback-only).
+ *
+ * Where the platform can tell which server a query was really sent to
+ * (tpp_dns_original; macOS), that server — normally the router — is
+ * still used for what only it can answer, never for a known-blocked
+ * name:
+ *   - local names (dns_name_is_local: "nas", "printer.lan", private
+ *     reverse lookups) go only to it, never to a public resolver;
+ *   - a name the trusted resolvers call nonexistent (NXDOMAIN) is
+ *     asked there too (LAN names, a VPN's internal zones);
+ *   - while every trusted resolver is failing (e.g. a captive portal
+ *     before login), it is asked first, so the network keeps working
+ *     (fail-open for DNS).
  * ============================================================ */
 
 #define FWD_MAX_INFLIGHT 128
 #define FWD_TCP_IDLE_MS 10000
 #define FWD_MSG_MAX 65535
 #define FWD_STACK_SIZE (128 * 1024)
+#define ORIGINAL_TIMEOUT_MS 2000
+
+/* The server a query was really sent to, when the platform knows. */
+typedef struct s_orig
+{
+	struct sockaddr_storage	addr;
+	socklen_t				len;
+}	t_orig;
 
 typedef struct s_udp_job
 {
@@ -87,10 +107,78 @@ static void	note_answer(const uint8_t *reply, size_t len, const char *name,
 		tpd_quic_block_answer(&ans);
 }
 
+/* The client's query, unchanged, to the server it was meant for
+ * (plain UDP from one of our own sockets, so it isn't intercepted). */
+static long	ask_original(const t_orig *orig, const uint8_t *query,
+	size_t qlen, uint8_t *reply, size_t reply_size)
+{
+	t_dns_udp_servers	one;
+	long				n;
+
+	memset(&one, 0, sizeof(one));
+	if (orig->len <= 0 || (size_t)orig->len > sizeof(one.addrs[0]))
+		return (-1);
+	memcpy(one.addrs[0], &orig->addr, orig->len);
+	one.addr_lens[0] = (unsigned int)orig->len;
+	one.count = 1;
+	one.so_mark = TP_SOCKET_MARK;
+	n = dns_udp_transport(0, query, qlen, reply, reply_size,
+			ORIGINAL_TIMEOUT_MS, &one);
+	if (n < 12 || reply[0] != query[0] || reply[1] != query[1]
+		|| dns_reply_rcode(reply, (size_t)n) < 0)
+		return (-1);
+	return (n);
+}
+
+/* Trusted resolvers, with the network's own resolver (when known) for
+ * what only it can answer — see the top of this file. */
+static long	resolve(const uint8_t *query, size_t qlen, uint8_t *reply,
+	size_t reply_size, const char *name, const t_orig *orig)
+{
+	uint8_t	*alt;
+	long	n;
+	long	m;
+
+	if (orig != NULL && dns_name_is_local(name))
+	{
+		tpd_debug("[dns] %s: local name, asked the network's resolver", name);
+		return (ask_original(orig, query, qlen, reply, reply_size));
+	}
+	if (orig != NULL && tp_host_listed(name))
+		orig = NULL;
+	if (orig != NULL && !dns_resolver_healthy(g_tpd.dns, tpd_now()))
+	{
+		n = ask_original(orig, query, qlen, reply, reply_size);
+		if (n > 0)
+		{
+			tpd_debug("[dns] %s: trusted resolvers unreachable, answered by "
+				"the network's resolver", name);
+			return (n);
+		}
+	}
+	n = dns_exchange(g_tpd.dns, query, qlen, reply, reply_size, tpd_now());
+	if (orig == NULL || (n > 0 && dns_reply_rcode(reply, (size_t)n) != 3))
+		return (n);
+	alt = malloc(reply_size);
+	if (alt == NULL)
+		return (n);
+	m = ask_original(orig, query, qlen, alt, reply_size);
+	if (m > 0 && (n <= 0 || (dns_reply_rcode(alt, (size_t)m) == 0
+				&& dns_reply_answer_count(alt, (size_t)m) > 0)))
+	{
+		tpd_debug("[dns] %s: %s; answered by the network's resolver", name,
+			n > 0 ? "not in public DNS" : "trusted resolvers failed");
+		memcpy(reply, alt, (size_t)m);
+		n = m;
+	}
+	free(alt);
+	return (n);
+}
+
 /* Answers one query into `reply` (never empty for a well-formed
  * query); `max` is what the client can take (UDP payload size). */
 static size_t	answer(const uint8_t *query, size_t qlen, uint8_t *reply,
-	size_t reply_size, int udp)
+	size_t reply_size, int udp, const t_orig *orig)
 {
 	char		name[DNS_NAME_MAX];
 	uint16_t	qtype;
@@ -100,7 +188,7 @@ static size_t	answer(const uint8_t *query, size_t qlen, uint8_t *reply,
 	if (dns_query_info(query, qlen, name, sizeof(name), &qtype, &udp_size)
 		!= 0)
 		return (0);
-	n = dns_exchange(g_tpd.dns, query, qlen, reply, reply_size, tpd_now());
+	n = resolve(query, qlen, reply, reply_size, name, orig);
 	count(n > 0);
 	if (n <= 0)
 	{
@@ -120,12 +208,17 @@ static void	*udp_worker(void *p)
 	t_udp_job	*job;
 	uint8_t		*reply;
 	size_t		n;
+	t_orig		orig;
+	int			known;
 
 	job = p;
 	reply = malloc(FWD_MSG_MAX);
 	if (reply != NULL)
 	{
-		n = answer(job->query, job->len, reply, FWD_MSG_MAX, 1);
+		known = (tpp_dns_original(job->fd, (struct sockaddr *)&job->peer,
+					job->peer_len, 0, &orig.addr, &orig.len) == 0);
+		n = answer(job->query, job->len, reply, FWD_MSG_MAX, 1,
+				known ? &orig : NULL);
 		if (n > 0)
 			sendto(job->fd, (const char *)reply, (int)n, 0,
 				(struct sockaddr *)&job->peer, job->peer_len);
@@ -224,8 +317,11 @@ static void	*tcp_worker(void *p)
 	uint8_t	hdr[2];
 	size_t	qlen;
 	size_t	n;
+	t_orig	orig;
+	int		known;
 
 	fd = (int)(intptr_t)p;
+	known = (tpp_dns_original(fd, NULL, 0, 1, &orig.addr, &orig.len) == 0);
 	query = malloc(FWD_MSG_MAX);
 	reply = malloc(FWD_MSG_MAX + 2);
 	while (query != NULL && reply != NULL
@@ -234,7 +330,8 @@ static void	*tcp_worker(void *p)
 		qlen = (size_t)(hdr[0] << 8 | hdr[1]);
 		if (qlen < 12 || read_full(fd, query, qlen, FWD_TCP_IDLE_MS) != 0)
 			break ;
-		n = answer(query, qlen, reply + 2, FWD_MSG_MAX, 0);
+		n = answer(query, qlen, reply + 2, FWD_MSG_MAX, 0,
+				known ? &orig : NULL);
 		if (n == 0)
 			break ;
 		reply[0] = (uint8_t)(n >> 8);

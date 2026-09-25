@@ -91,6 +91,11 @@ static void	vlog(const char *fmt, va_list ap)
 	char	line[1024];
 
 	vsnprintf(line, sizeof(line), fmt, ap);
+#ifdef __APPLE__
+	/* under launchd the log file is the log; stderr (launchd's
+	 * StandardErrorPath) would only duplicate it, unrotated */
+	if (g_tpd.opt.log_file == NULL || isatty(STDERR_FILENO))
+#endif
 	fprintf(stderr, "%s\n", line);
 	if (g_tpd.opt.log_file != NULL)
 	{
@@ -151,6 +156,12 @@ static const char	*data_path(const char *name)
 # define DEFAULT_DECISIONS data_path("tp-decisions.conf")
 # define DEFAULT_STATUS data_path("transparent.status")
 # define DEFAULT_LOG_FILE data_path("dpi-proxy.log")
+#elif defined(__APPLE__)
+# define DEFAULT_STRATEGY_CONF "/usr/local/etc/dpi-proxy/strategy.conf"
+# define DEFAULT_DECISIONS "/usr/local/var/dpi-proxy/tp-decisions.conf"
+# define DEFAULT_STATUS "/var/run/dpi-proxy/transparent.status"
+/* launchd has no journal: the daemon keeps (and rotates) its own */
+# define DEFAULT_LOG_FILE "/var/log/dpi-proxy.log"
 #else
 # define DEFAULT_STRATEGY_CONF "/etc/dpi-proxy/strategy.conf"
 # define DEFAULT_DECISIONS "/var/lib/dpi-proxy/tp-decisions.conf"
@@ -237,6 +248,39 @@ static int	write_file_atomic(const char *path, const char *data, size_t len)
 	return (0);
 }
 
+#ifdef __APPLE__
+
+/* launchd, unlike systemd, creates no runtime/state directories (and
+ * /var/run is emptied at boot): mkdir -p the parent of `path`. */
+static void	make_parent_dir(const char *path)
+{
+	char	dir[1024];
+	size_t	i;
+
+	if (snprintf(dir, sizeof(dir), "%s", path) >= (int)sizeof(dir))
+		return ;
+	i = strlen(dir);
+	while (i > 0 && dir[i - 1] != '/')
+		i--;
+	if (i <= 1)
+		return ;
+	dir[i - 1] = '\0';
+	i = 1;
+	while (dir[i] != '\0')
+	{
+		if (dir[i] == '/')
+		{
+			dir[i] = '\0';
+			mkdir(dir, 0755);
+			dir[i] = '/';
+		}
+		i++;
+	}
+	mkdir(dir, 0755);
+}
+
+#endif
+
 static void	load_strategy_conf(void)
 {
 	char				*text;
@@ -300,13 +344,14 @@ static void	save_decisions(void)
 
 static void	write_status(const char *engine)
 {
-	char		buf[2048];
+	char		buf[3072];
 	int			n;
 	t_tpd_stats	s;
 	uint64_t	fp;
 	size_t		ndec;
 	int			dns_ok;
 	char		learned[sizeof(g_tpd.last_learned)];
+	char		extra[512];
 
 	pthread_mutex_lock(&g_tpd.lock);
 	s = g_tpd.stats;
@@ -315,6 +360,7 @@ static void	write_status(const char *engine)
 	memcpy(learned, g_tpd.last_learned, sizeof(learned));
 	pthread_mutex_unlock(&g_tpd.lock);
 	dns_ok = dns_resolver_healthy(g_tpd.dns, tpd_now());
+	tpp_status_extra(extra, sizeof(extra));
 	n = snprintf(buf, sizeof(buf),
 			"engine: %s\nmode: transparent\npid: %d\nstarted: %" PRId64 "\n"
 			"updated: %" PRId64 "\nport: %d\ndns: %s\nnetwork: %016" PRIx64 "\n"
@@ -322,7 +368,7 @@ static void	write_status(const char *engine)
 			"bypassed: %lu\nfailures: %lu\nverified_ok: %lu\n"
 			"verified_bad: %lu\ndecisions: %zu\nlast_learned: %s\n"
 			"dns_intercept: %s\ndns_queries: %lu\ndns_failures: %lu\n"
-			"conflict: %s\ninterception: %s\n",
+			"conflict: %s\ninterception: %s\n%s",
 			engine, (int)getpid(), g_tpd.started_at, tpd_now(),
 			g_tpd.opt.port, dns_ok ? "healthy" : "degraded", fp,
 			s.flows_total, s.flows_active, s.passthrough, s.direct,
@@ -331,7 +377,7 @@ static void	write_status(const char *engine)
 			g_tpd.dns_intercept ? (g_tpd.doh ? "doh" : "plain") : "off",
 			s.dns_queries, s.dns_failures,
 			g_tpd.conflict && g_tpd.conflict_text ? g_tpd.conflict_text
-			: "none", tpp_name());
+			: "none", tpp_name(), extra);
 	if (n > 0 && (size_t)n < sizeof(buf))
 		write_file_atomic(g_tpd.opt.status_file, buf, (size_t)n);
 }
@@ -643,11 +689,9 @@ static void	main_loop(int lfd4, int lfd6)
 		if (lfd6 >= 0 && (pfd[1].revents & POLLIN))
 			accept_one(lfd6, AF_INET6, &attr);
 		now = tpd_now_ms();
-		if (nlfd >= 0 && (pfd[n - 1].revents & POLLIN))
-		{
-			tpp_netwatch_drain();
+		if (nlfd >= 0 && (pfd[n - 1].revents & POLLIN)
+			&& tpp_netwatch_drain())
 			net_due = now + NETCHANGE_SETTLE_MS;
-		}
 		if ((net_due != 0 && now >= net_due) || now >= next_netcheck)
 		{
 			net_due = 0;
@@ -682,6 +726,12 @@ int	run_transparent_server(const t_tp_options *opt)
 	pthread_mutex_init(&g_tpd.lock, NULL);
 	tp_decisions_init(&g_tpd.dec);
 	install_signals();
+#ifdef __APPLE__
+	make_parent_dir(opt->status_file);
+	make_parent_dir(opt->decisions_file);
+	if (opt->log_file != NULL)
+		make_parent_dir(opt->log_file);
+#endif
 	if (tpp_init() != 0)
 	{
 		tpd_log("cannot initialize the %s platform layer", tpp_name());
@@ -725,6 +775,7 @@ int	run_transparent_server(const t_tp_options *opt)
 			"rights%s)", tpp_name(),
 			strcmp(tpp_name(), "nftables") == 0
 			? ", CAP_NET_ADMIN and the nft binary" : "");
+		tpd_log("nothing is intercepted; traffic goes out directly");
 		tpp_remove();
 		compat_close(lfd4);
 		if (lfd6 >= 0)

@@ -576,6 +576,79 @@ static void	test_nft_ruleset(void)
 	assert(strstr(buf, "quic_block6 { 2606:4700::1 timeout 3600s }"));
 }
 
+/* ---- PF anchor text (macOS) ---- */
+
+static void	test_pf_ruleset(void)
+{
+	char	buf[8192];
+	size_t	len;
+
+	len = tp_pf_ruleset(buf, sizeof(buf), 1091, 0, 0);
+	assert(len > 0 && len == strlen(buf));
+	/* tables, translation, filtering — in the order pfctl requires */
+	assert(strstr(buf, "table <dpi_local4> const") < strstr(buf, "rdr pass"));
+	assert(strstr(buf, "rdr pass") < strstr(buf, "block return"));
+	assert(strstr(buf, "block return") < strstr(buf, "pass out quick"));
+	assert(strstr(buf, "rdr pass on lo0 inet proto tcp from any port "
+			"40000 <> 48999 to ! <dpi_local4> port 443 -> 127.0.0.1 port "
+			"1091\n") != NULL);
+	assert(strstr(buf, "pass out quick on ! lo0 route-to (lo0 127.0.0.1) "
+			"inet proto tcp from any port 40000 <> 48999 to ! <dpi_local4> "
+			"port 443 flags S/SA keep state\n") != NULL);
+	assert(strstr(buf, "block return out quick inet proto udp from any to "
+			"<dpi_quic4> port 443\n") != NULL);
+	/* private and loopback destinations are never redirected */
+	assert(strstr(buf, "192.168.0.0/16") != NULL);
+	assert(strstr(buf, "127.0.0.0/8") != NULL);
+	/* no IPv6 listener, no DNS forwarder: neither is touched */
+	assert(strstr(buf, "inet6 proto tcp") == NULL);
+	assert(strstr(buf, "port 53") == NULL);
+	len = tp_pf_ruleset(buf, sizeof(buf), 1091, 1, 1053);
+	assert(len > 0);
+	assert(strstr(buf, "rdr pass on lo0 inet6 proto tcp from any port 40000 "
+			"<> 48999 to ! <dpi_local6> port 443 -> ::1 port 1091\n") != NULL);
+	assert(strstr(buf, "route-to (lo0 ::1) inet6 proto tcp") != NULL);
+	assert(strstr(buf, "rdr pass on lo0 inet proto { udp, tcp } from any port "
+			"40000 <> 48999 to ! 127.0.0.0/8 port 53 -> 127.0.0.1 port 1053\n")
+		!= NULL);
+	assert(strstr(buf, "route-to (lo0 127.0.0.1) inet proto udp from any "
+			"port 40000 <> 48999 to ! 127.0.0.0/8 port 53 keep state\n")
+		!= NULL);
+	/* the router's DNS (private) is intercepted: only loopback and
+	 * IPv6 link-local/multicast servers are excluded */
+	assert(strstr(buf, "to ! <dpi_local4> port 53") == NULL);
+	assert(strstr(buf, "table <dpi_nodns6> const { ::1/128, fe80::/10, "
+			"ff00::/8 }") != NULL);
+	/* every interception rule skips our own source ports */
+	assert(strstr(buf, "pass out quick on ! lo0 route-to") != NULL);
+	{
+		const char	*p;
+		size_t		rules;
+
+		rules = 0;
+		p = buf;
+		while ((p = strstr(p, "route-to")) != NULL)
+		{
+			rules++;
+			p++;
+		}
+		assert(rules == 6);
+		rules = 0;
+		p = buf;
+		while ((p = strstr(p, "port 40000 <> 48999")) != NULL)
+		{
+			rules++;
+			p++;
+		}
+		assert(rules == 10);
+	}
+	/* too small: nothing half-written is returned */
+	assert(tp_pf_ruleset(buf, 200, 1091, 1, 1053) == 0);
+	assert(tp_pf_ruleset(buf, 0, 1091, 1, 1053) == 0);
+	assert(tp_pf_ruleset(buf, len, 1091, 1, 1053) == 0);
+	assert(tp_pf_ruleset(buf, len + 1, 1091, 1, 1053) == len);
+}
+
 int	main(void)
 {
 	test_no_host_is_single_direct();
@@ -600,6 +673,7 @@ int	main(void)
 	test_persistence_roundtrip();
 	test_bounded_growth();
 	test_nft_ruleset();
+	test_pf_ruleset();
 	printf("test_transparent: OK\n");
 	return (0);
 }

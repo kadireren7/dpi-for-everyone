@@ -29,14 +29,38 @@ jobs:
       - run: ./scripts/e2e-test-linux.sh
 
   macos:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
-      - run: make re
+      - run: echo "SSL=$RUNNER_TEMP/openssl-${{ matrix.arch }}" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openssl-${{ matrix.arch }}
+          key: openssl-3.5.8-${{ matrix.arch }}-macos11-v1
+      - run: ./scripts/macos/build-openssl.sh "$SSL" ${{ matrix.arch }}
+      - run: make test OPENSSL_PREFIX="$SSL"
+      - run: make clean && make all OPENSSL_PREFIX="$SSL" OPENSSL_STATIC=1
+      - run: |
+          ./scripts/macos/package.sh dpi-proxy-macos-${{ matrix.arch }}
+          ditto -c -k --keepParent dpi-proxy-macos-${{ matrix.arch }} dpi-proxy-macos-${{ matrix.arch }}.zip
+      # a release is only built from a package that passed the same
+      # end-to-end test as CI, on the machine type it is for
+      - name: extract the zip and run the transparent mode end-to-end test
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          ditto -x -k dpi-proxy-macos-${{ matrix.arch }}.zip "$RUNNER_TEMP/pkg"
+          ./scripts/macos/e2e-test.sh "$RUNNER_TEMP/pkg/dpi-proxy-macos-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: dpi-proxy-macos-arm64
-          path: dpi-proxy
+          name: dpi-proxy-macos-${{ matrix.arch }}
+          path: dpi-proxy-macos-${{ matrix.arch }}.zip
 
   windows:
     runs-on: windows-latest
@@ -65,8 +89,8 @@ jobs:
           path: dpi-proxy-windows-x86_64.zip
 
   publish:
-    # nothing is published unless every build and both end-to-end
-    # tests (Linux, Windows) passed
+    # nothing is published unless every build and every end-to-end
+    # test (Linux, Windows, macOS arm64 + x86_64) passed
     needs: [linux, linux-e2e, macos, windows]
     runs-on: ubuntu-latest
     steps:
@@ -78,10 +102,12 @@ jobs:
         run: |
           mkdir -p release
           cp dist/dpi-proxy-linux-x86_64/dpi-proxy release/dpi-proxy-linux-x86_64
-          cp dist/dpi-proxy-macos-arm64/dpi-proxy release/dpi-proxy-macos-arm64
+          cp dist/dpi-proxy-macos-arm64/dpi-proxy-macos-arm64.zip release/
+          cp dist/dpi-proxy-macos-x86_64/dpi-proxy-macos-x86_64.zip release/
           cp dist/dpi-proxy-windows-x86_64/dpi-proxy-windows-x86_64.zip release/
-          chmod +x release/dpi-proxy-linux-x86_64 release/dpi-proxy-macos-arm64
-          (cd release && sha256sum dpi-proxy-linux-x86_64 dpi-proxy-macos-arm64 dpi-proxy-windows-x86_64.zip > SHA256SUMS)
+          chmod +x release/dpi-proxy-linux-x86_64
+          (cd release && sha256sum dpi-proxy-linux-x86_64 dpi-proxy-macos-arm64.zip \
+            dpi-proxy-macos-x86_64.zip dpi-proxy-windows-x86_64.zip > SHA256SUMS)
       # The only place a release is created: notes come from
       # .github/release-notes/<tag>.md when present.
       - name: create release
@@ -100,7 +126,8 @@ jobs:
           esac
           gh release create "${{ github.ref_name }}" \
             release/dpi-proxy-linux-x86_64 \
-            release/dpi-proxy-macos-arm64 \
+            release/dpi-proxy-macos-arm64.zip \
+            release/dpi-proxy-macos-x86_64.zip \
             release/dpi-proxy-windows-x86_64.zip \
             release/SHA256SUMS \
             --title "dpi-for-everyone ${{ github.ref_name }}" \

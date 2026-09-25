@@ -42,4 +42,10 @@ void	tp_request_stop(void);
 int		tp_windows_service_run(const t_tp_options *opt);
 # endif
 
+# ifdef __APPLE__
+/* platform_macos.c: `dpi-proxy --pf-watchdog LOGFILE`, spawned by the
+ * daemon itself: removes the PF rules the moment the daemon dies. */
+int		tp_pf_watchdog_main(const char *log_file);
+# endif
+
 #endif
