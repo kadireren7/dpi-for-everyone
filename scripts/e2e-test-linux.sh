@@ -100,9 +100,14 @@ fi
 if grep -rlE '(^|[^a-zA-Z0-9_])'"$USER"'([^a-zA-Z0-9_]|$)' "$bundle_dir" >/dev/null 2>&1; then
 	die "support-bundle leaked the username ($USER) into the archive"
 fi
-[ -f "$bundle_dir/dns-history-summary.txt" ] || die "support-bundle missing dns-history-summary.txt"
-grep -q "raw per-domain/per-IP records are not included" "$bundle_dir/dns-history-summary.txt" \
-	|| die "support-bundle included raw DNS decision history instead of a summary"
+# dns-history-summary.txt is only written when tp-decisions.conf
+# exists (i.e. something was auto-learned, as opposed to the manual
+# tlsrec rule this test uses) — so its absence here is not a failure,
+# but if present it must be the redacted summary, never raw records.
+if [ -f "$bundle_dir/dns-history-summary.txt" ]; then
+	grep -q "raw per-domain/per-IP records are not included" "$bundle_dir/dns-history-summary.txt" \
+		|| die "support-bundle included raw DNS decision history instead of a summary"
+fi
 rm -rf "$bundle_dir" "$bundle"
 pass "dpictl status/doctor/support-bundle/version ran; archive redaction verified"
 
