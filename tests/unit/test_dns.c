@@ -461,6 +461,47 @@ static void	test_forwarding(void)
 	assert(dns_truncated_reply(q, 5, reply, sizeof(reply)) == 0);
 }
 
+static void	test_local_names_and_rcode(void)
+{
+	uint8_t	q[512];
+	uint8_t	r[512];
+	size_t	qlen;
+
+	assert(dns_name_is_local("nas"));
+	assert(dns_name_is_local("printer.local"));
+	assert(dns_name_is_local("router.lan"));
+	assert(dns_name_is_local("fritz.box.home.arpa"));
+	assert(dns_name_is_local("svc.corp"));
+	assert(dns_name_is_local("localhost"));
+	assert(dns_name_is_local("1.1.168.192.in-addr.arpa"));
+	assert(dns_name_is_local("5.0.0.10.in-addr.arpa"));
+	assert(dns_name_is_local("4.3.20.172.in-addr.arpa"));
+	assert(dns_name_is_local("1.2.64.100.in-addr.arpa"));
+	assert(dns_name_is_local("b.e.f.ip6.arpa"));
+	/* public names, and look-alikes that are not zone boundaries */
+	assert(!dns_name_is_local("discord.com"));
+	assert(!dns_name_is_local("example.local.com"));
+	assert(dns_name_is_local("mylan"));
+	assert(!dns_name_is_local("notlan.org"));
+	assert(!dns_name_is_local("4.3.32.172.in-addr.arpa"));
+	assert(!dns_name_is_local("1.1.1.1.in-addr.arpa"));
+	assert(!dns_name_is_local(""));
+	qlen = dns_build_query(0x1234, "example.com", DNS_QTYPE_A, q, sizeof(q));
+	assert(qlen > 0);
+	/* a query is not a reply */
+	assert(dns_reply_rcode(q, qlen) == -1);
+	assert(dns_reply_rcode(q, 5) == -1);
+	assert(dns_servfail_reply(q, qlen, r, sizeof(r)) == qlen);
+	assert(dns_reply_rcode(r, qlen) == 2);
+	assert(dns_reply_answer_count(r, qlen) == 0);
+	r[3] = (uint8_t)((r[3] & 0xF0) | 3);
+	assert(dns_reply_rcode(r, qlen) == 3);
+	r[6] = 0;
+	r[7] = 2;
+	assert(dns_reply_answer_count(r, qlen) == 2);
+	assert(dns_reply_answer_count(r, 7) == 0);
+}
+
 int	main(void)
 {
 	test_query_encoding();
@@ -475,6 +516,7 @@ int	main(void)
 	test_cache_hit_and_ttl_expiry_with_clamps();
 	test_server_backoff_and_health();
 	test_udp_server_list_parse();
+	test_local_names_and_rcode();
 	printf("test_dns: OK\n");
 	return (0);
 }

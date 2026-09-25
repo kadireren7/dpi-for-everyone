@@ -4,6 +4,9 @@
 #include "socks.h"
 #ifdef HAVE_TRANSPARENT
 # include "tp_sys.h"
+# ifdef __APPLE__
+#  include "tp.h"
+# endif
 #endif
 
 #include <stdio.h>
@@ -24,11 +27,12 @@ static void	print_usage(const char *argv0)
 		"Options:\n"
 		"  --listen HOST:PORT   bind address (default 127.0.0.1:%d)\n"
 		"  --mode proxy         SOCKS5 proxy (default)\n"
-		"  --mode transparent   Linux (root) / Windows (administrator):\n"
-		"                       intercept outgoing HTTPS and DNS\n"
-		"                       system-wide (nftables / WinDivert) and\n"
-		"                       bypass DPI automatically (normally run\n"
-		"                       by the installed service)\n"
+		"  --mode transparent   Linux / macOS (root), Windows\n"
+		"                       (administrator): intercept outgoing\n"
+		"                       HTTPS and DNS system-wide (nftables /\n"
+		"                       PF / WinDivert) and bypass DPI\n"
+		"                       automatically (normally run by the\n"
+		"                       installed service)\n"
 		"                       — see docs/transparent-mode.md\n"
 		"  --service            Windows: run as the \"dpi-proxy\" service\n"
 		"  --port PORT          transparent listener port (default %d)\n"
@@ -114,6 +118,22 @@ int	main(int argc, char **argv)
 	tp_port = 0;
 	tp_debug = 0;
 	tp_service = 0;
+
+#if defined(HAVE_TRANSPARENT) && defined(__APPLE__)
+	/* internal: the fail-open watchdog the transparent daemon spawns */
+	if (argc >= 2 && strcmp(argv[1], "--pf-watchdog") == 0)
+		return (tp_pf_watchdog_main(argc >= 3 ? argv[2] : NULL));
+	/* the PF anchor the daemon would load (checking: pfctl -nf -) */
+	if (argc >= 2 && strcmp(argv[1], "--print-pf-rules") == 0)
+	{
+		char	rules[8192];
+		size_t	len;
+
+		len = tp_pf_ruleset(rules, sizeof(rules), 1091, 1, 1053);
+		fwrite(rules, 1, len, stdout);
+		return (len > 0 ? 0 : 1);
+	}
+#endif
 
 	i = 1;
 	while (i < argc)
@@ -224,7 +244,7 @@ int	main(int argc, char **argv)
 		(void)tp_port;
 		(void)tp_debug;
 		fprintf(stderr, "--mode transparent is not available in this "
-			"build (Linux and Windows only); use the SOCKS5 proxy (the "
+			"build (Linux, macOS and Windows only); use the SOCKS5 proxy (the "
 			"default mode)\n");
 		return (1);
 #endif

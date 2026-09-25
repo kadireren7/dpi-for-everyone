@@ -282,4 +282,34 @@ size_t		tp_nft_heartbeat(char *out, size_t out_size, int dns);
 size_t		tp_nft_quic_block(char *out, size_t out_size, int family,
 				const char *addr);
 
+/* ---- PF ruleset (macOS) ---- */
+
+/* Our anchor. macOS's own /etc/pf.conf evaluates every child of
+ * com.apple (its rdr-anchor and anchor "com.apple/..." wildcards), so
+ * rules loaded here take effect without touching /etc/pf.conf or the
+ * main ruleset. Nothing else ever loads into this exact anchor. */
+# define TP_PF_ANCHOR "com.apple/dpi-proxy"
+/* Every socket the daemon opens itself binds to a local port in this
+ * range, which the rules never intercept (macOS has no SO_MARK). Below
+ * macOS's ephemeral range (49152-65535), so no other program's
+ * automatically chosen ports fall in it. */
+# define TP_PF_OWN_PORT_LO 40000
+# define TP_PF_OWN_PORT_HI 48999
+# define TP_PF_QUIC_TABLE4 "dpi_quic4"
+# define TP_PF_QUIC_TABLE6 "dpi_quic6"
+
+/* The anchor's rules, as `pfctl -a TP_PF_ANCHOR -f -` input. A packet
+ * leaving by any interface but lo0 for TCP/443 (not to a loopback,
+ * private, link-local or multicast address) — and, with dns_port > 0,
+ * for UDP/TCP 53 (any destination but loopback / IPv6 link-local and
+ * multicast) — is routed to lo0 (`route-to`), where an `rdr` rule
+ * hands it to our listener on 127.0.0.1 / ::1; the original
+ * destination stays in PF's state table (DIOCNATLOOK). Sources on
+ * TP_PF_OWN_PORT_LO..HI (ours) are never touched. UDP/443 to an address
+ * in the dpi_quic4/dpi_quic6 tables is refused (QUIC falls back to
+ * TCP). ipv6 = 0: IPv6 is left alone. Returns the length, 0 if
+ * out_size is too small. */
+size_t		tp_pf_ruleset(char *out, size_t out_size, int port, int ipv6,
+				int dns_port);
+
 #endif

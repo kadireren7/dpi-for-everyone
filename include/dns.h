@@ -174,6 +174,18 @@ size_t			dns_truncated_reply(const uint8_t *query, size_t qlen,
 size_t			dns_servfail_reply(const uint8_t *query, size_t qlen,
 					uint8_t *out, size_t out_size);
 
+/* RCODE of a reply (0 NOERROR, 2 SERVFAIL, 3 NXDOMAIN, ...); -1 if
+ * `pkt` is not a DNS reply at all. */
+int				dns_reply_rcode(const uint8_t *pkt, size_t len);
+/* ANCOUNT of a reply (0 if too short). */
+size_t			dns_reply_answer_count(const uint8_t *pkt, size_t len);
+/* Only the local network can answer this name (lowercase, dotted, no
+ * final dot): a single label, a local-use zone (local, lan, home,
+ * home.arpa, internal, ...), or the reverse zone of a private,
+ * link-local or CGNAT address. Such names are not sent to public
+ * resolvers. */
+int				dns_name_is_local(const char *name);
+
 /* ---- real UDP transport (src/dns/dns_udp.c) ---- */
 
 # define DNS_DEFAULT_SERVERS "1.1.1.1,1.0.0.1,8.8.8.8,8.8.4.4,9.9.9.9"

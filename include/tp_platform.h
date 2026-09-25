@@ -18,6 +18,12 @@
  *                                destination = the accepted peer, own
  *                                sockets excluded by a reserved local
  *                                port range
+ *   macOS    platform_macos.c    PF anchor (route-to lo0 + rdr), the
+ *                                original destination from PF's state
+ *                                table (DIOCNATLOOK), own sockets
+ *                                excluded by a reserved local port
+ *                                range, a watchdog process for
+ *                                fail-open
  * ============================================================ */
 
 /* One-time setup (Winsock on Windows). */
@@ -51,15 +57,24 @@ int			tpp_original_dst(int client_fd, int family,
  * only redirected queries are answered.) */
 int			tpp_dns_peer_ok(const struct sockaddr *peer, socklen_t len,
 				int tcp);
+/* The DNS server a redirected query was really sent to (usually the
+ * router). `fd`: the forwarder's UDP socket, or the accepted TCP
+ * connection; `peer`: the querying application. -1 when the platform
+ * can't tell (Linux, Windows): the forwarder then uses only the
+ * trusted resolvers, as before. */
+int			tpp_dns_original(int fd, const struct sockaddr *peer,
+				socklen_t peer_len, int tcp, struct sockaddr_storage *out,
+				socklen_t *out_len);
 /* Called on every socket the daemon itself opens (upstream, DoH,
  * plain DNS), before connect/sendto, so it is never intercepted. */
 int			tpp_prepare_socket(int fd, int family);
 
 /* Network change notification: a descriptor to poll (readable =
- * something changed; then call tpp_netwatch_drain), or -1 when the
- * platform only supports the periodic check. */
+ * something may have changed; then call tpp_netwatch_drain, which
+ * returns 1 if what arrived can change the network profile), or -1
+ * when the platform only supports the periodic check. */
 int			tpp_netwatch_fd(void);
-void		tpp_netwatch_drain(void);
+int			tpp_netwatch_drain(void);
 /* Current network fingerprint (netfingerprint.h semantics). */
 uint64_t	tpp_network_fingerprint(void);
 
@@ -67,7 +82,11 @@ uint64_t	tpp_network_fingerprint(void);
  * (Linux: the dpi-bypass nftables table). Text for the warning, or
  * NULL. */
 const char	*tpp_conflict(void);
-/* "nftables", "WinDivert" — for logs and status. */
+/* "nftables", "WinDivert", "PF" — for logs and status. */
 const char	*tpp_name(void);
+/* Extra "key: value" lines for the status file describing the
+ * interception's live state (macOS: PF enabled, anchor loaded,
+ * watchdog); writes "" when there is nothing to add. */
+void		tpp_status_extra(char *out, size_t out_size);
 
 #endif

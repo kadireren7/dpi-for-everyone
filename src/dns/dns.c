@@ -1,6 +1,7 @@
 #include "dns.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 
 const char	*dns_status_name(t_dns_status s)
@@ -558,4 +559,74 @@ size_t	dns_servfail_reply(const uint8_t *query, size_t qlen, uint8_t *out,
 	out[2] = (uint8_t)(out[2] & ~0x02);
 	out[3] = 0x80 | 0x02;
 	return (n);
+}
+
+int	dns_reply_rcode(const uint8_t *pkt, size_t len)
+{
+	if (len < 12 || !(pkt[2] & 0x80))
+		return (-1);
+	return (pkt[3] & 0x0F);
+}
+
+size_t	dns_reply_answer_count(const uint8_t *pkt, size_t len)
+{
+	if (len < 12)
+		return (0);
+	return ((size_t)(pkt[6] << 8 | pkt[7]));
+}
+
+/* `name` is `zone` or ends in ".zone" (both lowercase, no final dot). */
+static int	in_zone(const char *name, const char *zone)
+{
+	size_t	n;
+	size_t	z;
+
+	n = strlen(name);
+	z = strlen(zone);
+	if (n == z)
+		return (strcmp(name, zone) == 0);
+	return (n > z && name[n - z - 1] == '.'
+		&& strcmp(name + n - z, zone) == 0);
+}
+
+int	dns_name_is_local(const char *name)
+{
+	static const char	*zones[] = {
+		"local", "localhost", "localdomain", "lan", "home", "home.arpa",
+		"internal", "intranet", "corp",
+		"10.in-addr.arpa", "168.192.in-addr.arpa", "254.169.in-addr.arpa",
+		"c.f.ip6.arpa", "d.f.ip6.arpa", "8.e.f.ip6.arpa", "9.e.f.ip6.arpa",
+		"a.e.f.ip6.arpa", "b.e.f.ip6.arpa", NULL};
+	char				zone[32];
+	size_t				i;
+	int					octet;
+
+	if (name[0] == '\0')
+		return (0);
+	/* a single label ("printer", "nas") is never a public name */
+	if (strchr(name, '.') == NULL)
+		return (1);
+	i = 0;
+	while (zones[i] != NULL)
+	{
+		if (in_zone(name, zones[i]))
+			return (1);
+		i++;
+	}
+	/* 172.16.0.0/12 and 100.64.0.0/10 (carrier-grade NAT) */
+	octet = 16;
+	while (octet <= 31)
+	{
+		snprintf(zone, sizeof(zone), "%d.172.in-addr.arpa", octet++);
+		if (in_zone(name, zone))
+			return (1);
+	}
+	octet = 64;
+	while (octet <= 127)
+	{
+		snprintf(zone, sizeof(zone), "%d.100.in-addr.arpa", octet++);
+		if (in_zone(name, zone))
+			return (1);
+	}
+	return (0);
 }

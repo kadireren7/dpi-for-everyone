@@ -1,0 +1,255 @@
+#!/bin/sh
+#
+# dpi-proxy-ctl for macOS: the same commands as on Linux and Windows,
+# around launchd (the service), the daemon's status file and log, and
+# pfctl (only our own anchor is ever looked at).
+#
+#   dpi-proxy-ctl status | start | stop | restart | reload
+#   dpi-proxy-ctl logs [N] | strategy HOST | diagnose HOST
+#
+# start/stop/restart/reload need sudo; the rest works as any user.
+
+LABEL="io.github.kadireren7.dpi-proxy"
+PLIST="/Library/LaunchDaemons/$LABEL.plist"
+ANCHOR="com.apple/dpi-proxy"
+STATUS_FILE="${DPI_PROXY_TP_STATUS:-/var/run/dpi-proxy/transparent.status}"
+LOG_FILE="${DPI_PROXY_LOG_FILE:-/var/log/dpi-proxy.log}"
+STDERR_LOG="/var/log/dpi-proxy.stderr.log"
+DECISIONS="${DPI_PROXY_TP_DECISIONS:-/usr/local/var/dpi-proxy/tp-decisions.conf}"
+STRATEGY_CONF="${DPI_PROXY_STRATEGY_CONF:-/usr/local/etc/dpi-proxy/strategy.conf}"
+
+err() { printf 'dpi-proxy-ctl: %s\n' "$1" >&2; }
+
+need_root() {
+	if [ "$(id -u)" -ne 0 ]; then
+		err "\"$1\" needs administrator rights: sudo dpi-proxy-ctl $1"
+		exit 1
+	fi
+}
+
+field() {
+	sed -n "s/^$1: //p" "$STATUS_FILE" 2>/dev/null | head -n 1
+}
+
+# "running <pid>" / "loaded" / "not-loaded"
+service_state() {
+	out="$(launchctl print "system/$LABEL" 2>/dev/null)" || {
+		echo "not-loaded"
+		return
+	}
+	pid="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p' | head -n 1)"
+	if printf '%s\n' "$out" | grep -q '^[[:space:]]*state = running' && [ -n "$pid" ]; then
+		echo "running $pid"
+	else
+		echo "loaded"
+	fi
+}
+
+show_status() {
+	st="$(service_state)"
+	case "$st" in
+	running*) svc="running, pid ${st#running }" ;;
+	loaded) svc="loaded, not running" ;;
+	*) svc="stopped" ;;
+	esac
+	[ -f "$PLIST" ] || svc="not installed"
+	echo "service:   $LABEL ($svc)"
+	case "$st" in
+	running*) ;;
+	*)
+		echo "engine:    not running — HTTPS and DNS go out directly, untouched"
+		return 0
+		;;
+	esac
+	if [ ! -r "$STATUS_FILE" ] || [ "$(field pid)" != "${st#running }" ]; then
+		echo "engine:    starting (no status yet)"
+		return 0
+	fi
+	echo "engine:    $(field engine) ($(field interception))"
+	echo "mode:      $(field mode)"
+	echo "dns:       $(field dns) resolvers; interception: $(field dns_intercept)" \
+		"($(field dns_queries) queries, $(field dns_failures) failed)"
+	echo "network:   $(field network)"
+	echo "flows:     $(field flows) total, $(field active) active"
+	echo "direct:    $(field direct)"
+	echo "bypassed:  $(field bypassed)"
+	echo "passthru:  $(field passthrough) (no hostname / manual pass / cooldown)"
+	echo "failures:  $(field failures)"
+	echo "verified:  $(field verified_ok) ok, $(field verified_bad) rejected"
+	echo "learned:   $(field decisions) decision(s); last: $(field last_learned)"
+	echo "pf:        $(field pf); anchor $(field pf_anchor); main-ruleset hooks $(field pf_hooks)"
+	echo "watchdog:  $(field pf_watchdog)"
+	c="$(field conflict)"
+	if [ -n "$c" ] && [ "$c" != "none" ]; then
+		echo "CONFLICT:  $c — stop the other tool, the two interfere"
+	fi
+	if [ "$(id -u)" -eq 0 ]; then
+		n="$(pfctl -a "$ANCHOR" -s nat 2>/dev/null | grep -c '^rdr')"
+		m="$(pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -c 'route-to')"
+		echo "pf rules:  $n redirect + $m route-to rule(s) live in anchor $ANCHOR"
+	fi
+}
+
+wait_running() {
+	i=0
+	while [ $i -lt 30 ]; do
+		st="$(service_state)"
+		case "$st" in
+		running*)
+			if [ "$(field pid)" = "${st#running }" ] && [ "$(field engine)" = running ]; then
+				return 0
+			fi
+			;;
+		esac
+		sleep 0.5
+		i=$((i + 1))
+	done
+	return 1
+}
+
+do_start() {
+	need_root start
+	[ -f "$PLIST" ] || { err "not installed ($PLIST missing); run install.sh"; exit 1; }
+	case "$(service_state)" in
+	not-loaded) launchctl bootstrap system "$PLIST" || exit 1 ;;
+	running*) ;;
+	*) launchctl kickstart "system/$LABEL" || exit 1 ;;
+	esac
+	if wait_running; then show_status; else
+		err "the service did not come up; see: dpi-proxy-ctl logs"
+		exit 1
+	fi
+}
+
+do_stop() {
+	need_root stop
+	if [ "$(service_state)" != "not-loaded" ]; then
+		launchctl bootout "system/$LABEL" 2>/dev/null || true
+	fi
+	i=0
+	while [ $i -lt 40 ] && [ "$(service_state)" != "not-loaded" ]; do
+		sleep 0.25
+		i=$((i + 1))
+	done
+	echo "stopped; networking is back to normal (unbypassed) until the next start or reboot"
+}
+
+do_restart() {
+	need_root restart
+	case "$(service_state)" in
+	not-loaded) do_start ;;
+	*)
+		launchctl kickstart -k "system/$LABEL" || exit 1
+		sleep 1
+		if wait_running; then show_status; else
+			err "the service did not come up; see: dpi-proxy-ctl logs"
+			exit 1
+		fi
+		;;
+	esac
+}
+
+do_reload() {
+	need_root reload
+	st="$(service_state)"
+	case "$st" in
+	running*) kill -HUP "${st#running }" && echo "manual rules reloaded from $STRATEGY_CONF" ;;
+	*) err "not running"; exit 1 ;;
+	esac
+}
+
+do_logs() {
+	n="${1:-100}"
+	case "$n" in *[!0-9]* | "") n=100 ;; esac
+	if [ -r "$LOG_FILE" ]; then
+		tail -n "$n" "$LOG_FILE"
+	else
+		echo "no log yet ($LOG_FILE)"
+	fi
+	if [ -s "$STDERR_LOG" ]; then
+		echo "--- $STDERR_LOG (output from before logging started) ---"
+		tail -n 20 "$STDERR_LOG"
+	fi
+}
+
+# What applies to HOST right now: manual rule, else a learned decision
+# for the current network, else the automatic ladder.
+show_strategy() {
+	domain="$1"
+	rule="$(awk -v d="$domain" '
+		/^\[domains\]/ { in_d = 1; next }
+		/^\[/ { in_d = 0 }
+		in_d && $1 == d && $2 == "=" { print $3 }' "$STRATEGY_CONF" 2>/dev/null | tail -n 1)"
+	if [ -n "$rule" ]; then
+		echo "$domain: $rule (manual, $STRATEGY_CONF)"
+		return 0
+	fi
+	fp="$(field network)"
+	learned=""
+	if [ -n "$fp" ] && [ -r "$DECISIONS" ]; then
+		learned="$(awk -v d="$domain" -v fp="$fp" 'tolower($1) == tolower(d) && $2 == fp {
+			print "IPv" $3 ": " $5 " address + " $4 }' "$DECISIONS" 2>/dev/null)"
+	fi
+	if [ -n "$learned" ]; then
+		printf '%s: %s (learned on this network)\n' "$domain" "$learned"
+	else
+		echo "$domain: automatic (nothing learned for it on this network yet)"
+	fi
+}
+
+# Read-only look at what happens with HOST. Not needed for normal use.
+diagnose() {
+	domain="$1"
+	echo "== $domain"
+	show_status | sed -n '1,3p'
+	echo "system DNS:   $(dscacheutil -q host -a name "$domain" 2>/dev/null \
+		| sed -n 's/^ip_address: //p' | sort -u | tr '\n' ' ')"
+	echo "strategy:     $(show_strategy "$domain" | cut -d' ' -f2-)"
+	echo "https:        $(curl -sS -o /dev/null --max-time 15 \
+		-w 'HTTP %{http_code}, certificate verify=%{ssl_verify_result} (0 = ok), ip=%{remote_ip}, %{time_total}s' \
+		"https://$domain/" 2>&1)"
+	if [ -r "$LOG_FILE" ]; then
+		echo "recent log lines mentioning it:"
+		grep -F " $domain" "$LOG_FILE" 2>/dev/null | tail -n 8 | sed 's/^/  /'
+	fi
+}
+
+usage() {
+	cat <<'EOF'
+Usage: dpi-proxy-ctl <command> [args]
+
+  status               engine, DNS, counters, PF state
+  start | stop | restart | reload     (need sudo)
+  logs [N]             recent log lines (default 100)
+  strategy HOST        what applies to HOST right now
+  diagnose HOST        read-only look at DNS/HTTPS for HOST
+
+Uninstall: sudo ./uninstall.sh (in the extracted package folder).
+EOF
+}
+
+cmd="${1:-status}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+status) show_status ;;
+start) do_start ;;
+stop) do_stop ;;
+restart) do_restart ;;
+reload) do_reload ;;
+logs) do_logs "${1:-100}" ;;
+strategy)
+	[ $# -ge 1 ] || { err "strategy needs a host, e.g. dpi-proxy-ctl strategy discord.com"; exit 1; }
+	show_strategy "$1"
+	;;
+diagnose)
+	[ $# -ge 1 ] || { err "diagnose needs a host, e.g. dpi-proxy-ctl diagnose discord.com"; exit 1; }
+	diagnose "$1"
+	;;
+-h | --help | help) usage ;;
+*)
+	err "unknown command: $cmd"
+	usage >&2
+	exit 1
+	;;
+esac
