@@ -1,8 +1,10 @@
 dpi-for-everyone - macOS quick start (Beta)
 ===========================================
 
-For macOS 11 or newer. Nothing to build or download besides this
-package: no Xcode, Homebrew, Git or Python needed.
+Built for macOS 11 or newer (tested on macOS 14, 15 and 26). Nothing
+to build or download besides this package: no Xcode, Homebrew, Git or
+Python needed. Apple silicon (M1/M2/M3/...): the -arm64 package;
+Intel Macs: the -x86_64 package.
 
 BEFORE YOU START
   Quit other DPI tools (SpoofDPI, ByeDPI, zapret/tpws, GoodbyeDPI-like

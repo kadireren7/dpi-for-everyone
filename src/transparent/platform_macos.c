@@ -1246,6 +1246,13 @@ void	tpp_status_extra(char *out, size_t out_size)
 static volatile sig_atomic_t	g_wd_term;
 static const char				*g_wd_log;
 
+/* Time the machine was awake: a Mac asleep for an hour did not see its
+ * daemon hang for an hour (CLOCK_MONOTONIC keeps counting in sleep). */
+static int64_t	awake_ms(void)
+{
+	return ((int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000));
+}
+
 static void	wd_on_signal(int sig)
 {
 	(void)sig;
@@ -1311,7 +1318,7 @@ int	tp_pf_watchdog_main(const char *log_file)
 	in_token = 0;
 	clean = 0;
 	flushed = 0;
-	last = compat_now_ms();
+	last = awake_ms();
 	while (1)
 	{
 		pfd.fd = STDIN_FILENO;
@@ -1345,7 +1352,7 @@ int	tp_pf_watchdog_main(const char *log_file)
 					clean = 1;
 				else if (buf[i] == 'b')
 				{
-					last = compat_now_ms();
+					last = awake_ms();
 					flushed = 0;
 				}
 				i++;
@@ -1357,7 +1364,7 @@ int	tp_pf_watchdog_main(const char *log_file)
 			wd_log("stopped by a signal; dpi-proxy PF rules removed");
 			return (0);
 		}
-		if (!flushed && compat_now_ms() - last > TP_ALIVE_TIMEOUT_S * 1000)
+		if (!flushed && awake_ms() - last > TP_ALIVE_TIMEOUT_S * 1000)
 		{
 			anchor_flush();
 			flushed = 1;

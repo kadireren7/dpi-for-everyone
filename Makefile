@@ -273,7 +273,8 @@ windows: $(WIN_OBJ)
 # Windows): the shared decision/DNS/TLS-parsing core.
 WIN_TESTS = test_dns test_transparent test_tls test_tls_record test_strategy
 WIN_TEST_OBJ = src/dns/dns.win.o src/dns/dns_udp.win.o src/compat.win.o \
-	src/transparent/policy.win.o src/strategy/strategy.win.o \
+	src/transparent/policy.win.o src/transparent/pf_rules.win.o \
+	src/strategy/strategy.win.o \
 	src/tls/sni_extract.win.o src/tls.win.o src/platform.win.o
 windows-tests: $(WIN_TEST_OBJ)
 	@for t in $(WIN_TESTS); do \

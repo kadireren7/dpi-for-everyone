@@ -301,8 +301,13 @@ pass "hung: rules removed after ${t}s, HTTPS $c meanwhile; resumed: reinstalled 
 
 stepn "crash of daemon and watchdog together: launchd's restart cleans up"
 sudo pkill -9 -f '^/usr/local/bin/dpi-proxy'
-sleep 0.5
+t=0
 note "rules right after killing both: $(anchor_rules) (stay until launchd restarts the daemon)"
+while [ $t -lt 30 ] && ! ok "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 https://example.com/ 2>/dev/null)"; do
+	sleep 1; t=$((t + 1))
+done
+note "HTTPS worked again after ${t}s"
+[ $t -lt 30 ] || die "no HTTPS for 30 s after killing daemon and watchdog"
 wait_running || die "launchd did not restart the daemon"
 c="$(fetch https://example.com/)"; ok "$c" || die "after restart -> '$c'"
 [ "$(pgrep -f -- '--pf-watchdog' | wc -l | tr -d ' ')" -eq 1 ] || die "not exactly one watchdog"
@@ -316,7 +321,8 @@ for f in /usr/local/bin/dpi-proxy /usr/local/bin/dpi-proxy-ctl /usr/local/etc/dp
 	/usr/local/var/dpi-proxy /var/run/dpi-proxy /var/log/dpi-proxy.log /var/log/dpi-proxy.stderr.log; do
 	[ -e "$f" ] && die "$f left"
 done
-command -v dpi-proxy-ctl >/dev/null && die "dpi-proxy-ctl still on the PATH"
+# a new shell: this one still has the old location hashed
+/bin/sh -c 'command -v dpi-proxy-ctl' >/dev/null && die "dpi-proxy-ctl still on the PATH"
 pgrep -f '^/usr/local/bin/dpi-proxy' >/dev/null && die "a dpi-proxy process is left"
 anchor_empty || die "rules or tables left in $ANCHOR"
 sudo pfctl -s References 2>/dev/null | grep -q '[0-9]\{8,\}' && [ "$(sed -n 1p /tmp/dpi-e2e-pf-before.txt)" = Disabled ] \
