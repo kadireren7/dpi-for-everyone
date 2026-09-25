@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -772,7 +773,7 @@ void	tpp_remove(void)
 void	tpp_quic_block(const t_dns_addr *addrs, size_t n)
 {
 	char		text[DNS_MAX_ADDRS][INET6_ADDRSTRLEN];
-	const char	*args[6 + DNS_MAX_ADDRS];
+	const char	*args[7 + DNS_MAX_ADDRS];
 	size_t		i;
 	size_t		k;
 	int			fam;
@@ -788,7 +789,7 @@ void	tpp_quic_block(const t_dns_addr *addrs, size_t n)
 		args[5] = "add";
 		k = 6;
 		i = 0;
-		while (i < n && i < DNS_MAX_ADDRS && k < 14)
+		while (i < n && i < DNS_MAX_ADDRS)
 		{
 			if (addrs[i].family == fam && inet_ntop(fam == 6 ? AF_INET6
 					: AF_INET, addrs[i].addr, text[i], sizeof(text[i])) != NULL)

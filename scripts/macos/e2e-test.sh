@@ -59,12 +59,20 @@ wait_running() {
 	return 1
 }
 pf_state() {
-	# PF on/off, the main ruleset and nat/rdr rules, the anchors: what
-	# must be exactly the same before install and after uninstall
+	# PF on/off, the main ruleset and nat/rdr rules, the other anchors:
+	# what must be exactly the same before install and after stop /
+	# uninstall. (Our anchor's *name* is left out: once created, macOS
+	# keeps an anchor name registered, empty, until reboot — no pfctl
+	# operation removes it, not even -F all. anchor_empty checks that
+	# nothing is in it.)
 	sudo pfctl -s info 2>/dev/null | sed -n 's/^Status: \([A-Za-z]*\).*/\1/p'
 	sudo pfctl -s rules 2>/dev/null
 	sudo pfctl -s nat 2>/dev/null
-	sudo pfctl -a com.apple -s Anchors 2>/dev/null
+	sudo pfctl -a com.apple -s Anchors 2>/dev/null | grep -v -x '  com.apple/dpi-proxy'
+}
+anchor_empty() {
+	[ -z "$( { sudo pfctl -a "$ANCHOR" -s nat; sudo pfctl -a "$ANCHOR" -s rules;
+		sudo pfctl -a "$ANCHOR" -s Tables; } 2>/dev/null | grep -v -e '^No ALTQ' -e '^ALTQ')" ]
 }
 
 stepn "before: PF state and direct networking"
@@ -248,7 +256,7 @@ pass "after restart: HTTP $c (pid $(daemon_pid))"
 stepn "stop = ordinary networking, PF as before"
 sudo dpi-proxy-ctl stop || die "stop failed"
 [ -z "$(daemon_pid)" ] || die "still running"
-[ "$(anchor_rules)" -eq 0 ] || die "rules left in $ANCHOR after stop"
+anchor_empty || die "rules or tables left in $ANCHOR after stop"
 sleep 1
 pgrep -f -- '--pf-watchdog' >/dev/null && die "watchdog still running after a clean stop"
 pf_state >/tmp/dpi-e2e-pf-stopped.txt
@@ -310,13 +318,14 @@ for f in /usr/local/bin/dpi-proxy /usr/local/bin/dpi-proxy-ctl /usr/local/etc/dp
 done
 command -v dpi-proxy-ctl >/dev/null && die "dpi-proxy-ctl still on the PATH"
 pgrep -f '^/usr/local/bin/dpi-proxy' >/dev/null && die "a dpi-proxy process is left"
-[ "$(anchor_rules)" -eq 0 ] || die "rules left in $ANCHOR"
-sudo pfctl -a com.apple -s Anchors 2>/dev/null | grep -q dpi-proxy && die "anchor $ANCHOR still listed"
+anchor_empty || die "rules or tables left in $ANCHOR"
+sudo pfctl -s References 2>/dev/null | grep -q '[0-9]\{8,\}' && [ "$(sed -n 1p /tmp/dpi-e2e-pf-before.txt)" = Disabled ] \
+	&& die "a PF enable reference is still held"
 pf_state >/tmp/dpi-e2e-pf-after.txt
 diff /tmp/dpi-e2e-pf-before.txt /tmp/dpi-e2e-pf-after.txt || die "PF state differs from before install"
 sudo pfctl -s References 2>/dev/null
 c="$(fetch https://example.com/)"; ok "$c" || die "after uninstall -> '$c'"
-pass "no plist, job, binaries, config, state, logs, processes, PF rules or anchor; PF as before; HTTPS $c"
+pass "no plist, job, binaries, config, state, logs, processes, PF rules, tables or PF reference; PF as before; HTTPS $c"
 
 stepn "clean reinstall"
 ( cd "$PKG" && sudo ./install.sh ) || die "reinstall failed"

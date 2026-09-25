@@ -116,7 +116,7 @@ static long	ask_original(const t_orig *orig, const uint8_t *query,
 	long				n;
 
 	memset(&one, 0, sizeof(one));
-	if (orig->len > sizeof(one.addrs[0]))
+	if (orig->len <= 0 || (size_t)orig->len > sizeof(one.addrs[0]))
 		return (-1);
 	memcpy(one.addrs[0], &orig->addr, orig->len);
 	one.addr_lens[0] = (unsigned int)orig->len;

@@ -84,3 +84,5 @@ if [ -n "$left" ]; then
 	exit 1
 fi
 log "dpi-proxy is uninstalled; networking is back to normal."
+echo "    (macOS keeps the now empty PF anchor name $ANCHOR registered until"
+echo "    the next restart; it contains no rules and does nothing.)"
