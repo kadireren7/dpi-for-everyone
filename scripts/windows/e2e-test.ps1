@@ -109,25 +109,87 @@ $c2 = Fetch 'https://example.com/'
 if ($c2 -notmatch '^[23]\d\d$') { Die "after automatic restart -> '$c2'" }
 Pass "killed: HTTPS still $c; restarted automatically; HTTPS $c2"
 
-Step 'dpi-proxy-ctl'
-$ctl = Join-Path $InstDir 'dpi-proxy-ctl.cmd'
+Step 'dpictl (primary CLI)'
+$dpictl = Join-Path $InstDir 'dpictl.cmd'
 # as a user would: a new PowerShell (fresh machine PATH), plain command
 # name, under the default client execution policy (Restricted)
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command 'dpi-proxy-ctl status' 2>&1 | Out-String)
+$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command 'dpictl status --verbose' 2>&1 | Out-String)
 Write-Host $out
 if ($LASTEXITCODE -ne 0 -or $out -notmatch 'engine:\s+running' -or $out -notmatch 'bypassed:') {
-    Die 'dpi-proxy-ctl status (by name, Restricted policy) did not report a running engine'
+    Die 'dpictl status --verbose (by name, Restricted policy) did not report a running engine'
 }
-$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command "Set-Location '$Package'; .\dpi-proxy-ctl status" 2>&1 | Out-String)
-if ($out -notmatch 'engine:\s+running') { Die '.\dpi-proxy-ctl status from the package folder failed' }
+$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command 'dpictl status' 2>&1 | Out-String)
+Write-Host $out
+if ($out -notmatch 'Service: Running' -or $out -notmatch 'Protection: Active') {
+    Die 'dpictl status (default, short form) did not report Running/Active'
+}
+$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command "Set-Location '$Package'; .\dpictl status" 2>&1 | Out-String)
+if ($out -notmatch 'Service: Running') { Die '.\dpictl status from the package folder failed' }
+$out = (& $dpictl diagnose example.com 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'https:\s+HTTP \d+') { Die 'dpictl diagnose failed' }
+$out = (& $dpictl logs 5 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'transparent mode:') { Die 'dpictl logs failed' }
+$out = (& $dpictl version 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or -not $out.Trim()) { Die 'dpictl version printed nothing' }
+Pass 'dpictl status/diagnose/logs/version report correctly'
+
+Step 'dpictl doctor'
+$out = (& $dpictl doctor 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0) { Die "dpictl doctor reported a failure while the service is healthy:`n$out" }
+Pass 'doctor: no failures'
+
+Step 'dpictl support-bundle (redaction)'
+$bundle = Join-Path $env:TEMP "dpi-e2e-support-$PID.zip"
+& $dpictl support-bundle $bundle
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bundle)) { Die 'support-bundle failed to produce an archive' }
+$bdir = Join-Path $env:TEMP "dpi-e2e-support-$PID"
+Expand-Archive -Path $bundle -DestinationPath $bdir -Force
+if (-not (Test-Path (Join-Path $bdir 'version.txt'))) { Die 'support-bundle archive missing version.txt' }
+$leaked = Get-ChildItem $bdir -Recurse -File | Select-String -SimpleMatch $env:USERPROFILE
+if ($leaked) { Die "support-bundle leaked `$env:USERPROFILE into the archive" }
+$dnsSummary = Join-Path $bdir 'dns-history-summary.txt'
+if ((Test-Path $dnsSummary) -and -not (Select-String -Path $dnsSummary -SimpleMatch 'raw per-domain/per-IP records are not included')) {
+    Die 'support-bundle included raw DNS decision history instead of a summary'
+}
+Remove-Item $bundle, $bdir -Recurse -Force -ErrorAction SilentlyContinue
+Pass 'support-bundle archive redacted correctly'
+
+Step 'dpi-proxy-ctl (compatibility alias)'
+$ctl = Join-Path $InstDir 'dpi-proxy-ctl.cmd'
+$out = (& powershell -NoProfile -ExecutionPolicy Restricted -Command 'dpi-proxy-ctl status --verbose' 2>&1 | Out-String)
+Write-Host $out
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'engine:\s+running') { Die 'dpi-proxy-ctl alias did not report a running engine' }
 $out = (& $ctl diagnose example.com 2>&1 | Out-String)
-Write-Host $out
-if ($LASTEXITCODE -ne 0 -or $out -notmatch 'https:\s+HTTP \d+') { Die 'dpi-proxy-ctl diagnose failed' }
-$out = (& $ctl logs 5 2>&1 | Out-String)
-Write-Host $out
-if ($LASTEXITCODE -ne 0 -or $out -notmatch 'transparent mode:') { Die 'dpi-proxy-ctl logs failed' }
-Pass 'ctl status/diagnose/logs report correctly'
+if ($LASTEXITCODE -ne 0 -or $out -notmatch 'https:\s+HTTP \d+') { Die 'dpi-proxy-ctl alias diagnose failed' }
+Pass 'dpi-proxy-ctl still works as an alias'
+
+Step 'size and resource use'
+$exe = Join-Path $InstDir 'dpi-proxy.exe'
+Get-Item $exe | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+$t0 = Get-Date
+Restart-Service dpi-proxy
+$ok = $false
+foreach ($i in 1..40) {
+    Start-Sleep -Milliseconds 250
+    if ((Select-String -Path $StatusFile -Pattern '^engine: running' -Quiet -ErrorAction SilentlyContinue)) { $ok = $true; break }
+}
+$t1 = Get-Date
+if (-not $ok) { Die 'did not report running after restart (resource-use step)' }
+Write-Host ("startup time: {0:N2}s (restart issued -> engine: running)" -f ($t1 - $t0).TotalSeconds)
+$proc = Get-Process -Name dpi-proxy
+Write-Host ("daemon: {0} thread(s), working set {1:N1} MB, CPU time {2}" -f $proc.Threads.Count, ($proc.WorkingSet64 / 1MB), $proc.TotalProcessorTime)
+foreach ($u in 'https://example.com/', 'https://www.wikipedia.org/', 'https://github.com/') {
+    1..3 | ForEach-Object -Parallel { & curl.exe -sS -o NUL --max-time 20 $using:u } -ThrottleLimit 9
+}
+$proc.Refresh()
+Write-Host ("daemon under load: working set {0:N1} MB, CPU time {1}" -f ($proc.WorkingSet64 / 1MB), $proc.TotalProcessorTime)
+& curl.exe -sS -o NUL --max-time 60 -w 'throughput: %{size_download} bytes in %{time_total}s (%{speed_download} B/s)\n' 'https://speed.cloudflare.com/__down?bytes=50000000'
+Pass 'measured'
 
 Step 'uninstall cleans only our own state'
 # as documented: the uninstall.ps1 from the extracted package folder

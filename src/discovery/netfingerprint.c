@@ -242,6 +242,64 @@ static void	get_iface_local_addr(const char *iface, char *out,
 	close(fd);
 }
 
+/* MAC address of the IPv4 gateway `gw_ip` (dotted-decimal), read from
+ * /proc/net/arp — the kernel's own ARP/neighbor table; no packet is
+ * ever sent by this lookup. Mirrors what platform_windows.c
+ * (GetIpNetEntry2) and platform_macos.c (gateway_mac(), RTF_LLINFO)
+ * already do: without it, two different networks that both hand out
+ * the same private gateway IP (192.168.1.1, a phone hotspot's
+ * default, …) on the same interface type, with no SSID available to
+ * tell them apart (plain ethernet, or Wi-Fi without `nmcli`), would
+ * hash to the same fingerprint — and a bypass decision learned on one
+ * would silently be reused, wrongly, on the other. Returns 1 and
+ * fills `mac` (6 bytes) on a complete entry, 0 if the gateway has no
+ * resolved ARP entry yet (e.g. right after boot, before the first ARP
+ * request completes) — best-effort, never fabricated. */
+static int	gateway_mac_v4(const char *gw_ip, uint8_t *mac)
+{
+	FILE			*f;
+	char			line[256];
+	char			ip_field[64];
+	char			flags_field[16];
+	char			hwaddr_field[32];
+	unsigned int	b[6];
+	int				i;
+
+	f = fopen("/proc/net/arp", "r");
+	if (f == NULL)
+		return (0);
+	if (fgets(line, sizeof(line), f) == NULL) /* header line */
+	{
+		fclose(f);
+		return (0);
+	}
+	while (fgets(line, sizeof(line), f) != NULL)
+	{
+		/* "IP address / HW type / Flags / HW address / Mask / Device" */
+		if (sscanf(line, "%63s %*s %15s %31s", ip_field, flags_field,
+				hwaddr_field) != 3)
+			continue ;
+		if (strcmp(ip_field, gw_ip) != 0)
+			continue ;
+		if (sscanf(hwaddr_field, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2],
+				&b[3], &b[4], &b[5]) != 6)
+			continue ;
+		if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0
+			&& b[5] == 0)
+			continue ; /* incomplete ARP entry (flags 0x0) */
+		i = 0;
+		while (i < 6)
+		{
+			mac[i] = (uint8_t)b[i];
+			i++;
+		}
+		fclose(f);
+		return (1);
+	}
+	fclose(f);
+	return (0);
+}
+
 void	netprofile_gather(t_net_profile *out)
 {
 	uint32_t	gw_raw;
@@ -271,27 +329,22 @@ void	netprofile_describe(const t_net_profile *profile, char *buf,
 		profile->local_addr[0] ? profile->local_addr : "(none)");
 }
 
-uint64_t	netfingerprint_current(void)
+uint64_t	netfingerprint_hash(const t_net_profile *profile,
+	uint32_t gw_raw, const uint8_t *gw_mac, int has_gw_mac)
 {
-	t_net_profile	profile;
-	char			iface[NETPROFILE_IFACE_MAX];
-	uint32_t		gw_raw;
-	uint64_t		hash;
-
-	if (!find_default_route_v4(iface, sizeof(iface), &gw_raw))
-		return (NETFP_UNKNOWN);
-
-	netprofile_gather(&profile);
+	uint64_t	hash;
 
 	hash = 1469598103934665603ULL; /* FNV offset basis */
-	hash = fnv1a(hash, iface, strlen(iface));
+	hash = fnv1a(hash, profile->iface, strlen(profile->iface));
 	hash = fnv1a(hash, &gw_raw, sizeof(gw_raw));
-	hash = fnv1a(hash, &profile.link_type, sizeof(profile.link_type));
-	hash = fnv1a(hash, profile.ssid, strlen(profile.ssid));
-	hash = fnv1a(hash, &profile.has_ipv4_default,
-			sizeof(profile.has_ipv4_default));
-	hash = fnv1a(hash, &profile.has_ipv6_default,
-			sizeof(profile.has_ipv6_default));
+	if (has_gw_mac)
+		hash = fnv1a(hash, gw_mac, 6);
+	hash = fnv1a(hash, &profile->link_type, sizeof(profile->link_type));
+	hash = fnv1a(hash, profile->ssid, strlen(profile->ssid));
+	hash = fnv1a(hash, &profile->has_ipv4_default,
+			sizeof(profile->has_ipv4_default));
+	hash = fnv1a(hash, &profile->has_ipv6_default,
+			sizeof(profile->has_ipv6_default));
 
 	/* NETFP_UNKNOWN (0) is reserved to mean "no fingerprint could be
 	 * computed" — on the astronomically unlikely chance the hash
@@ -300,4 +353,27 @@ uint64_t	netfingerprint_current(void)
 	if (hash == NETFP_UNKNOWN)
 		hash = 1;
 	return (hash);
+}
+
+uint64_t	netfingerprint_current(void)
+{
+	t_net_profile	profile;
+	char			iface[NETPROFILE_IFACE_MAX];
+	uint32_t		gw_raw;
+	uint8_t			gw_mac[6];
+	int				has_gw_mac;
+	struct in_addr	gw_addr;
+	char			gw_ip[INET_ADDRSTRLEN];
+
+	if (!find_default_route_v4(iface, sizeof(iface), &gw_raw))
+		return (NETFP_UNKNOWN);
+
+	netprofile_gather(&profile);
+
+	has_gw_mac = 0;
+	gw_addr.s_addr = gw_raw;
+	if (inet_ntop(AF_INET, &gw_addr, gw_ip, sizeof(gw_ip)) != NULL)
+		has_gw_mac = gateway_mac_v4(gw_ip, gw_mac);
+
+	return (netfingerprint_hash(&profile, gw_raw, gw_mac, has_gw_mac));
 }

@@ -54,7 +54,7 @@ if [ -f "$RUN_DIR/pf.token" ]; then
 fi
 
 log "Removing files..."
-rm -f /usr/local/bin/dpi-proxy /usr/local/bin/dpi-proxy-ctl
+rm -f /usr/local/bin/dpi-proxy /usr/local/bin/dpictl /usr/local/bin/dpi-proxy-ctl
 created=""
 [ -f "$VAR_DIR/created-dirs" ] && created="$(sort -r -u "$VAR_DIR/created-dirs")"
 rm -rf /usr/local/etc/dpi-proxy "$VAR_DIR" "$RUN_DIR"
@@ -72,6 +72,7 @@ killall -HUP mDNSResponder 2>/dev/null || true
 left=""
 [ -e "$PLIST" ] && left="$left $PLIST"
 [ -e /usr/local/bin/dpi-proxy ] && left="$left /usr/local/bin/dpi-proxy"
+[ -e /usr/local/bin/dpictl ] && left="$left /usr/local/bin/dpictl"
 [ -e /usr/local/bin/dpi-proxy-ctl ] && left="$left /usr/local/bin/dpi-proxy-ctl"
 [ -e /usr/local/etc/dpi-proxy ] && left="$left /usr/local/etc/dpi-proxy"
 [ -e "$VAR_DIR" ] && left="$left $VAR_DIR"

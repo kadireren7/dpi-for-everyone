@@ -82,10 +82,65 @@ sleep 3
 c="$(fetch https://example.com/)"; ok "$c" || die "after restart -> '$c'"
 pass "killed: fail-open, restarted, HTTPS $c"
 
-stepn "dpi-proxy-ctl"
+stepn "dpictl"
+dpictl status
+dpictl status --verbose
+dpictl diagnose example.com
+dpictl version | grep -q . || die "dpictl version printed nothing"
+dpictl doctor || die "dpictl doctor reported a failure while the service is healthy"
+bundle="$(mktemp -u).tar.gz"
+dpictl support-bundle "$bundle" || die "support-bundle failed"
+[ -s "$bundle" ] || die "support-bundle produced an empty/missing archive"
+bundle_dir="$(mktemp -d)"
+tar -xzf "$bundle" -C "$bundle_dir"
+[ -f "$bundle_dir/version.txt" ] || die "support-bundle archive missing version.txt"
+if grep -rl "$HOME" "$bundle_dir" >/dev/null 2>&1; then
+	die "support-bundle leaked \$HOME ($HOME) into the archive"
+fi
+if grep -rlE '(^|[^a-zA-Z0-9_])'"$USER"'([^a-zA-Z0-9_]|$)' "$bundle_dir" >/dev/null 2>&1; then
+	die "support-bundle leaked the username ($USER) into the archive"
+fi
+# dns-history-summary.txt is only written when tp-decisions.conf
+# exists (i.e. something was auto-learned, as opposed to the manual
+# tlsrec rule this test uses) — so its absence here is not a failure,
+# but if present it must be the redacted summary, never raw records.
+if [ -f "$bundle_dir/dns-history-summary.txt" ]; then
+	grep -q "raw per-domain/per-IP records are not included" "$bundle_dir/dns-history-summary.txt" \
+		|| die "support-bundle included raw DNS decision history instead of a summary"
+fi
+rm -rf "$bundle_dir" "$bundle"
+pass "dpictl status/doctor/support-bundle/version ran; archive redaction verified"
+
+stepn "dpi-proxy-ctl (compatibility alias)"
 dpi-proxy-ctl status
 dpi-proxy-ctl diagnose example.com
-pass "ctl ran"
+pass "alias still works"
+
+stepn "size and resource use"
+ls -l /usr/local/bin/dpi-proxy
+t0="$(date +%s.%N)"
+sudo systemctl restart dpi-proxy-transparent
+i=0
+while [ $i -lt 40 ]; do
+	grep -q '^engine: running' "$STATUS" 2>/dev/null && break
+	sleep 0.25
+	i=$((i + 1))
+done
+t1="$(date +%s.%N)"
+grep -q '^engine: running' "$STATUS" || die "did not report running after restart (resource-use step)"
+awk -v a="$t0" -v b="$t1" 'BEGIN { printf "startup time: %.2fs (start issued -> engine: running)\n", b - a }'
+pid="$(field pid)"
+ps -o pid=,nlwp=,rss=,vsz=,%cpu= -p "$pid" \
+	| awk '{ printf "daemon pid %s: %s thread(s), RSS %.1f MB, VSZ %.0f MB, CPU %s%%\n", $1, $2, $3/1024, $4/1024, $5 }'
+for u in https://example.com/ https://www.wikipedia.org/ https://github.com/; do
+	for _ in 1 2 3; do fetch "$u" >/dev/null & done
+done
+wait
+ps -o pid=,rss=,%cpu= -p "$pid" | awk '{ printf "daemon pid %s under load: RSS %.1f MB, CPU %s%%\n", $1, $2/1024, $3 }'
+curl -sS -o /dev/null --max-time 60 \
+	-w 'throughput: %{size_download} bytes in %{time_total}s (%{speed_download} B/s)\n' \
+	'https://speed.cloudflare.com/__down?bytes=50000000' || true
+pass "measured"
 
 stepn "uninstall cleans only our own state"
 sudo "$ROOT/scripts/uninstall.sh" --purge

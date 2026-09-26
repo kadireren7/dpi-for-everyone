@@ -1,0 +1,640 @@
+#!/usr/bin/env bash
+#
+# dpictl — control CLI for dpi-proxy's systemd services (Linux).
+#
+# Zero runtime dependencies beyond what the services already need:
+# plain bash around systemctl/journalctl/nft and the installed
+# binaries. systemd stays the source of truth for service state.
+#
+# Transparent mode (dpi-proxy-transparent.service) is the default
+# engine on Linux: start/stop/restart/reload/status/logs act on it.
+# Packet mode (dpi-proxy-packet.service) keeps its own commands:
+# probe/reprobe/networks and `packet <start|stop|restart|status|logs>`.
+#
+# Normal use needs none of the diagnostic commands — the transparent
+# engine learns what each host needs by itself.
+#
+# `dpi-proxy-ctl` is kept as a compatibility alias for this script —
+# see that file.
+
+set -euo pipefail
+
+TP_SERVICE="dpi-proxy-transparent"
+PACKET_SERVICE="dpi-proxy-packet"
+TP_TABLE="dpi_proxy_tp"
+PACKET_TABLE="dpi_proxy"
+
+err() { printf 'dpictl: %s\n' "$1" >&2; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Value of KEY in a unit's Environment= lines, or FALLBACK. An explicit
+# DPI_PROXY_* in the caller's environment still wins (callers apply
+# that with ${VAR:-...}).
+service_env() {
+	local unit="$1" key="$2" fallback="$3" val=""
+	if have systemctl; then
+		val="$(systemctl show -p Environment --value "$unit" 2>/dev/null \
+			| tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n 1)"
+	fi
+	printf '%s' "${val:-$fallback}"
+}
+
+TP_STATUS_FILE="${DPI_PROXY_TP_STATUS:-$(service_env "$TP_SERVICE" DPI_PROXY_TP_STATUS /run/dpi-proxy/transparent.status)}"
+TP_DECISIONS="${DPI_PROXY_TP_DECISIONS:-$(service_env "$TP_SERVICE" DPI_PROXY_TP_DECISIONS /var/lib/dpi-proxy/tp-decisions.conf)}"
+STRATEGY_CONF="${DPI_PROXY_STRATEGY_CONF:-$(service_env "$TP_SERVICE" DPI_PROXY_STRATEGY_CONF /etc/dpi-proxy/strategy.conf)}"
+
+# The system-service binary (/usr/local/bin/dpi-proxy, installed by
+# scripts/install.sh) takes priority over whatever "dpi-proxy" a user's
+# PATH happens to resolve first (e.g. a plain SOCKS5-only dev build in
+# ~/.local/bin) — dpictl reports on the installed service, not on an
+# arbitrary same-named binary earlier in PATH.
+find_binary() {
+	if [ -x /usr/local/bin/dpi-proxy ]; then
+		echo /usr/local/bin/dpi-proxy
+	elif have dpi-proxy; then
+		command -v dpi-proxy
+	else
+		return 1
+	fi
+}
+
+find_packet_binary() {
+	if [ -x /usr/local/bin/dpi-proxy-packet ]; then
+		echo /usr/local/bin/dpi-proxy-packet
+	elif have dpi-proxy-packet; then
+		command -v dpi-proxy-packet
+	else
+		return 1
+	fi
+}
+
+need_systemctl() { have systemctl || { err "systemctl not found"; exit 1; }; }
+
+status_field() {
+	sed -n "s/^$1: //p" "$TP_STATUS_FILE" 2>/dev/null | head -n 1
+}
+
+version_string() {
+	local bin
+	if bin="$(find_binary)"; then
+		"$bin" --version 2>/dev/null | sed -n 's/^dpi-proxy //p'
+	fi
+}
+
+# Compact, human-first summary (the default). Full internals: --verbose.
+status_short() {
+	local ver svc engine table protection dns_state fails bypassed
+	ver="$(version_string)"
+	echo "dpi-for-everyone ${ver:-(version unknown — dpi-proxy not found)}"
+
+	svc="inactive"
+	have systemctl && svc="$(systemctl is-active "$TP_SERVICE" 2>/dev/null || true)"
+	if [ "$svc" = active ]; then
+		echo "Service: Running"
+	elif [ "$svc" = failed ]; then
+		echo "Service: Failed"
+	else
+		echo "Service: Stopped"
+		echo "Protection: Inactive"
+		echo "DNS: N/A"
+		echo "Mode: N/A"
+		echo "Bypassed: 0"
+		echo "Failures: 0"
+		return 0
+	fi
+
+	engine="$(status_field engine)"
+	if [ "$(id -u)" -eq 0 ]; then
+		table="absent"
+		nft list table inet "$TP_TABLE" >/dev/null 2>&1 && table="present"
+		if [ "$engine" = running ] && [ "$table" = present ]; then
+			protection="Active"
+		elif [ "$engine" = running ]; then
+			protection="Degraded (interception table missing)"
+		else
+			protection="Starting"
+		fi
+	elif [ "$engine" = running ]; then
+		protection="Active"
+	else
+		protection="Starting"
+	fi
+	echo "Protection: $protection"
+
+	fails="$(status_field dns_failures)"
+	case "$(status_field dns_intercept)" in
+	doh)
+		if [ -z "$fails" ] || [ "$fails" = 0 ]; then dns_state="Healthy"
+		else dns_state="Degraded ($fails failure(s))"; fi
+		;;
+	off) dns_state="Not intercepted" ;;
+	*) dns_state="Unknown" ;;
+	esac
+	echo "DNS: $dns_state"
+
+	echo "Mode: $(status_field mode | sed 's/^./\U&/')"
+	echo "Bypassed: $(status_field bypassed)"
+	echo "Failures: $(status_field failures)"
+}
+
+# Compact summary from the daemon's status file (rewritten every ~10s)
+# plus the live nft counter of intercepted connections. This is the
+# `--verbose` / `status --verbose` output.
+status_verbose() {
+	local state="inactive" counter
+	if have systemctl; then
+		state="$(systemctl is-active "$TP_SERVICE" 2>/dev/null || true)"
+	fi
+	echo "service:   $TP_SERVICE ($state)"
+	if [ "$state" != "active" ] || [ ! -r "$TP_STATUS_FILE" ]; then
+		echo "engine:    not running — HTTPS goes out directly, untouched"
+		return 0
+	fi
+	echo "engine:    $(status_field engine)"
+	echo "mode:      $(status_field mode)"
+	echo "dns:       $(status_field dns) resolvers; interception: $(status_field dns_intercept)" \
+		"($(status_field dns_queries) queries, $(status_field dns_failures) failed)"
+	echo "network:   $(status_field network)"
+	echo "flows:     $(status_field flows) total, $(status_field active) active"
+	echo "direct:    $(status_field direct)"
+	echo "bypassed:  $(status_field bypassed)"
+	echo "passthru:  $(status_field passthrough) (no hostname / manual pass / cooldown)"
+	echo "failures:  $(status_field failures)"
+	echo "verified:  $(status_field verified_ok) ok, $(status_field verified_bad) rejected"
+	echo "learned:   $(status_field decisions) decision(s); last: $(status_field last_learned)"
+	if [ "$(status_field conflict)" != "none" ] && [ -n "$(status_field conflict)" ]; then
+		echo "CONFLICT:  $(status_field conflict) — stop dpi-bypass: sudo systemctl stop dpi-bypass"
+	fi
+	other="$(nft list tables 2>/dev/null | awk '$3 != "'"$TP_TABLE"'" { print $2 " " $3 }' \
+		| while read -r fam tbl; do
+			nft list table "$fam" "$tbl" 2>/dev/null | grep -qE 'hook output.*nat|redirect to' \
+				&& nft list table "$fam" "$tbl" 2>/dev/null | grep -qE 'dport.*443.*redirect|redirect.*443' \
+				&& printf '%s %s; ' "$fam" "$tbl"
+		done || true)"
+	if [ -n "$other" ]; then
+		echo "WARNING:   another tool also redirects HTTPS (table $other) — two"
+		echo "           interceptors on one machine is not supported; results mix"
+	fi
+	counter="$(nft list chain inet "$TP_TABLE" output_nat 2>/dev/null \
+		| sed -n 's/.*counter packets \([0-9]*\).*redirect.*/\1/p' | head -n 1 || true)"
+	if [ -n "$counter" ]; then
+		echo "nftables:  table inet $TP_TABLE present, $counter connection(s) intercepted"
+	elif [ "$(id -u)" -ne 0 ]; then
+		echo "nftables:  (run with sudo to show interception counters)"
+	else
+		echo "nftables:  table inet $TP_TABLE MISSING — nothing is intercepted"
+	fi
+}
+
+# What applies to DOMAIN right now: manual rule, else a learned
+# decision for the current network, else the automatic ladder.
+tp_strategy() {
+	local domain="$1" fp rule learned
+	fp="$(status_field network)"
+	rule="$(awk -v d="$domain" '
+		/^\[domains\]/ { in_d = 1; next }
+		/^\[/ { in_d = 0 }
+		in_d && $1 == d && $2 == "=" { print $3 }' "$STRATEGY_CONF" 2>/dev/null | tail -n 1)"
+	if [ -n "$rule" ]; then
+		echo "$domain: $rule (manual, $STRATEGY_CONF)"
+		return 0
+	fi
+	if [ -n "$fp" ] && [ -r "$TP_DECISIONS" ]; then
+		learned="$(awk -v d="$domain" -v fp="$fp" 'tolower($1) == tolower(d) && $2 == fp {
+			print "IPv" $3 ": " $5 " address + " $4 " (learned " strftime("%F %T", $6) ")" }' \
+			"$TP_DECISIONS" 2>/dev/null || true)"
+	fi
+	if [ -n "${learned:-}" ]; then
+		printf '%s: %s\n' "$domain" "$learned"
+	else
+		echo "$domain: direct (automatic; nothing learned for it on this network)"
+	fi
+}
+
+# Read-only look at what the network does with DOMAIN. Not needed for
+# normal use.
+tp_diagnose() {
+	local domain="$1"
+	echo "== $domain"
+	echo "system DNS:   $(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+	if have dig; then
+		echo "trusted DNS:  $(dig +short +time=2 +tries=1 A "$domain" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | tr '\n' ' ')"
+	fi
+	echo "strategy:     $(tp_strategy "$domain" | cut -d' ' -f2-)"
+	if have curl; then
+		echo "https:        $(curl -sS -o /dev/null --max-time 15 \
+			-w 'HTTP %{http_code}, verify=%{ssl_verify_result}, ip=%{remote_ip}' \
+			"https://$domain/" 2>&1 || true)"
+	fi
+	if have journalctl; then
+		echo "recent log lines mentioning it:"
+		journalctl -u "$TP_SERVICE" --no-pager -n 500 2>/dev/null \
+			| grep -F " $domain" | tail -n 5 || true
+	fi
+}
+
+run_probe() {
+	local bin was_active=0 rc=0
+	bin="$(find_packet_binary)" || { err "dpi-proxy-packet not found (packet mode not installed)"; exit 1; }
+	# A probe starts its own scoped packet engine on the same table
+	# (inet dpi_proxy) and queue as the packet service: stop that
+	# service for the duration and start it again afterwards.
+	if have systemctl && systemctl is-active --quiet "$PACKET_SERVICE"; then
+		was_active=1
+		echo "Stopping $PACKET_SERVICE for the probe (restarted afterwards)..."
+		systemctl stop "$PACKET_SERVICE"
+	fi
+	DPI_PROXY_STRATEGY_CONF="${DPI_PROXY_STRATEGY_CONF:-$(service_env "$PACKET_SERVICE" DPI_PROXY_STRATEGY_CONF /etc/dpi-proxy/strategy.conf)}" \
+	DPI_PROXY_DISCOVERY_CACHE="${DPI_PROXY_DISCOVERY_CACHE:-$(service_env "$PACKET_SERVICE" DPI_PROXY_DISCOVERY_CACHE /etc/dpi-proxy/discovery-cache.conf)}" \
+		"$bin" "$@" || rc=$?
+	if [ "$was_active" = 1 ]; then
+		systemctl start "$PACKET_SERVICE" \
+			|| err "could not restart $PACKET_SERVICE — run: sudo dpictl packet start"
+	fi
+	return "$rc"
+}
+
+# ---- doctor ----------------------------------------------------------
+#
+# Read-only checks, each printed as [PASS|WARN|FAIL] plus a one-line
+# reason. Never modifies or disables anything (including other DPI
+# tools it detects). Exit status: 0 if nothing failed, 1 if any check
+# failed.
+
+DOCTOR_FAILED=0
+check() {
+	local level="$1" msg="$2"
+	case "$level" in
+	FAIL) DOCTOR_FAILED=1 ;;
+	esac
+	printf '[%-4s] %s\n' "$level" "$msg"
+}
+
+doctor_service() {
+	local state="inactive"
+	if ! have systemctl; then
+		check WARN "service: systemctl not found — cannot check"
+		return
+	fi
+	if ! systemctl list-unit-files 2>/dev/null | grep -q "^$TP_SERVICE.service"; then
+		check WARN "service: $TP_SERVICE is not installed"
+		return
+	fi
+	state="$(systemctl is-active "$TP_SERVICE" 2>/dev/null || true)"
+	case "$state" in
+	active) check PASS "service: $TP_SERVICE is active" ;;
+	failed) check FAIL "service: $TP_SERVICE has failed — see: journalctl -u $TP_SERVICE -n 50" ;;
+	*) check WARN "service: $TP_SERVICE is $state" ;;
+	esac
+}
+
+doctor_interception() {
+	local svc="inactive" table=0
+	have systemctl && svc="$(systemctl is-active "$TP_SERVICE" 2>/dev/null || true)"
+	nft list table inet "$TP_TABLE" >/dev/null 2>&1 && table=1
+	if [ "$svc" = active ] && [ "$table" = 1 ]; then
+		check PASS "interception: nftables table inet $TP_TABLE present"
+	elif [ "$svc" = active ] && [ "$table" = 0 ]; then
+		if [ "$(id -u)" -ne 0 ]; then
+			check WARN "interception: cannot see nftables state without root (run: sudo dpictl doctor)"
+		else
+			check FAIL "interception: service active but table inet $TP_TABLE is missing"
+		fi
+	elif [ "$svc" != active ]; then
+		check WARN "interception: not running (service is $svc) — HTTPS is not intercepted"
+	fi
+}
+
+doctor_dns() {
+	local intercept fails queries
+	if [ ! -r "$TP_STATUS_FILE" ]; then
+		check WARN "dns: no status file yet ($TP_STATUS_FILE) — is the service running?"
+		return
+	fi
+	intercept="$(status_field dns_intercept)"
+	fails="$(status_field dns_failures)"
+	queries="$(status_field dns_queries)"
+	case "$intercept" in
+	doh)
+		if [ -z "$fails" ] || [ "$fails" = 0 ]; then
+			check PASS "dns: DNS-over-HTTPS active, 0 failures ($queries queries)"
+		else
+			check WARN "dns: DNS-over-HTTPS active but $fails failure(s) of $queries queries"
+		fi
+		;;
+	off) check WARN "dns: interception is off (DPI_PROXY_TP_DNS=off) — poisoned DNS is not protected against" ;;
+	*) check WARN "dns: unexpected state \"$intercept\"" ;;
+	esac
+}
+
+doctor_reachability() {
+	if ! have curl; then
+		check WARN "reachability: curl not found — cannot check"
+		return
+	fi
+	local code
+	code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 https://example.com/ 2>/dev/null || true)"
+	if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+		check PASS "reachability: https://example.com/ -> HTTP $code"
+	else
+		check FAIL "reachability: https://example.com/ failed (got \"$code\") — check your internet connection"
+	fi
+}
+
+doctor_bypass() {
+	local bin caps
+	bin="$(find_binary)" || { check WARN "bypass path: dpi-proxy binary not found"; return; }
+	caps="$("$bin" --capabilities 2>/dev/null || true)"
+	if echo "$caps" | grep -q '^transparent_mode: supported'; then
+		check PASS "bypass path: this binary supports transparent mode"
+	else
+		check FAIL "bypass path: this binary was built without transparent mode support"
+	fi
+}
+
+doctor_conflicts() {
+	local found=""
+	if systemctl is-active --quiet dpi-bypass 2>/dev/null || nft list table ip dpibypass >/dev/null 2>&1; then
+		found="$found dpi-bypass"
+	fi
+	if systemctl is-active --quiet zapret 2>/dev/null; then
+		found="$found zapret"
+	fi
+	if pgrep -x nfqws >/dev/null 2>&1; then
+		found="$found nfqws(zapret)"
+	fi
+	if pgrep -x goodbyedpi >/dev/null 2>&1; then
+		found="$found goodbyedpi"
+	fi
+	# Any other tool's table redirecting outbound 443 (same heuristic
+	# status --verbose uses).
+	local other
+	other="$(nft list tables 2>/dev/null | awk '$3 != "'"$TP_TABLE"'" && $3 != "'"$PACKET_TABLE"'" { print $2 "/" $3 }' \
+		| while read -r t; do
+			fam="${t%/*}"; tbl="${t#*/}"
+			nft list table "$fam" "$tbl" 2>/dev/null | grep -qE 'dport.*443.*redirect|redirect.*443' \
+				&& printf '%s ' "$t"
+		done || true)"
+	[ -n "$other" ] && found="$found nftables-table:($other)"
+	if [ -n "$found" ]; then
+		check WARN "conflicts: other DPI/interception tool(s) detected:$found — dpi-proxy does not disable them; stop one manually"
+	else
+		check PASS "conflicts: no other known DPI-bypass tool detected"
+	fi
+}
+
+doctor_vpn() {
+	local ifaces iflist
+	ifaces="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(tun|tap|wg)[0-9]*$' || true)"
+	if [ -n "$ifaces" ]; then
+		iflist="$(printf '%s' "$ifaces" | tr '\n' ' ' | sed 's/ *$//')"
+		check WARN "vpn: VPN/tunnel interface(s) present ($iflist) — if it also filters HTTPS, it may interact with dpi-proxy"
+	else
+		check PASS "vpn: no VPN/tunnel interface detected"
+	fi
+}
+
+doctor_stale() {
+	local svc="inactive"
+	have systemctl && svc="$(systemctl is-active "$TP_SERVICE" 2>/dev/null || true)"
+	if [ "$svc" != active ] && nft list table inet "$TP_TABLE" >/dev/null 2>&1; then
+		check FAIL "stale rules: table inet $TP_TABLE exists while the service is $svc — run: sudo nft delete table inet $TP_TABLE"
+	else
+		check PASS "stale rules: none found"
+	fi
+}
+
+doctor_permissions() {
+	if [ "$(id -u)" -eq 0 ]; then
+		check PASS "permissions: running as root — full diagnostics available"
+	else
+		check WARN "permissions: not root — some checks are limited; re-run with sudo for full detail"
+	fi
+	local bin
+	if bin="$(find_binary)" && [ -x "$bin" ]; then
+		check PASS "permissions: $bin is present and executable"
+	else
+		check FAIL "permissions: dpi-proxy binary not found in PATH or /usr/local/bin"
+	fi
+}
+
+doctor() {
+	echo "dpictl doctor — $(date -u +%FT%TZ)"
+	echo
+	doctor_permissions
+	doctor_service
+	doctor_interception
+	doctor_dns
+	doctor_reachability
+	doctor_bypass
+	doctor_conflicts
+	doctor_vpn
+	doctor_stale
+	echo
+	if [ "$DOCTOR_FAILED" = 1 ]; then
+		echo "Result: one or more checks FAILED — see above."
+		return 1
+	fi
+	echo "Result: no failures."
+	return 0
+}
+
+# ---- support-bundle ----------------------------------------------------
+#
+# A local diagnostics archive: version, OS, status, recent logs,
+# config, service state, conflict detection. No telemetry — this is
+# written to disk only; nothing is ever sent anywhere by this command.
+#
+# Redacted: obvious tokens/keys, this machine's public IP, the full
+# per-domain/per-IP DNS decision history (kept as counts only), and
+# $HOME/the invoking user's name in file paths.
+
+redact() {
+	local home user
+	home="${HOME:-}"
+	user="$(id -un 2>/dev/null || true)"
+	sed -E \
+		-e 's/([Tt]oken|[Kk]ey|[Ss]ecret|[Pp]assword)[=: ]+[A-Za-z0-9_.\-]{4,}/\1=[REDACTED]/g' \
+		${home:+-e "s#${home//\//\\/}#~#g"} \
+		${user:+-e "s/\\b${user}\\b/[user]/g"}
+}
+
+support_bundle() {
+	local outdir out ts bin
+	ts="$(date -u +%Y%m%dT%H%M%SZ)"
+	outdir="$(mktemp -d)"
+	out="${1:-./dpictl-support-$ts.tar.gz}"
+
+	{
+		echo "dpictl support-bundle"
+		echo "generated: $ts (UTC)"
+		echo "version:   $(version_string)"
+		bin="$(find_binary)" && echo "binary:    $bin"
+	} > "$outdir/version.txt"
+
+	uname -a > "$outdir/os.txt" 2>&1 || true
+	if have lsb_release; then lsb_release -a >> "$outdir/os.txt" 2>&1 || true; fi
+	[ -f /etc/os-release ] && cat /etc/os-release >> "$outdir/os.txt" 2>&1 || true
+
+	status_short > "$outdir/status.txt" 2>&1 || true
+	status_verbose >> "$outdir/status.txt" 2>&1 || true
+
+	doctor > "$outdir/doctor.txt" 2>&1 || true
+
+	if have systemctl; then
+		{
+			systemctl status --no-pager "$TP_SERVICE" 2>&1 || true
+			echo
+			systemctl status --no-pager "$PACKET_SERVICE" 2>&1 || true
+		} | redact > "$outdir/service-state.txt"
+	fi
+
+	if have journalctl; then
+		journalctl -u "$TP_SERVICE" --no-pager -n 500 2>/dev/null | redact > "$outdir/log-transparent.txt" || true
+		journalctl -u "$PACKET_SERVICE" --no-pager -n 200 2>/dev/null | redact > "$outdir/log-packet.txt" || true
+	fi
+
+	if [ -r "$STRATEGY_CONF" ]; then
+		redact < "$STRATEGY_CONF" > "$outdir/strategy.conf"
+	fi
+
+	# DNS/decision history: counts only, never the raw per-domain,
+	# per-IP records (that's the user's browsing history).
+	if [ -r "$TP_DECISIONS" ]; then
+		{
+			echo "learned decisions on record: $(wc -l < "$TP_DECISIONS" 2>/dev/null || echo 0)"
+			echo "(raw per-domain/per-IP records are not included in support bundles)"
+		} > "$outdir/dns-history-summary.txt"
+	fi
+
+	tar -C "$outdir" -czf "$out" .
+	rm -rf "$outdir"
+	echo "Wrote $out"
+	echo "Redacted: tokens/keys/passwords, \$HOME, username, and per-domain DNS history (counts only)."
+	echo "Review it before sharing — it may still contain domain names you visited and log timestamps."
+}
+
+usage() {
+	cat <<'EOF'
+Usage: dpictl [--json] <command> [args]
+
+  status [--verbose]   compact engine summary (--verbose: full detail)
+  start | stop | restart | reload     (need root)
+  logs [N]             recent log lines (default 100)
+  strategy DOMAIN      what applies to DOMAIN right now
+  diagnose DOMAIN      read-only look at DNS/HTTPS for DOMAIN
+  doctor               health checks (service/DNS/interception/conflicts)
+  support-bundle [FILE] local diagnostics archive (no telemetry)
+  version              print the dpi-proxy version and exit
+
+Packet mode (dpi-proxy-packet, optional):
+  packet start|stop|restart|reload|status|logs [N]
+  probe DOMAIN | reprobe DOMAIN        (need root)
+  networks             network profile + packet-mode strategies
+
+--json applies to the packet-mode status/networks/strategy output.
+See docs/transparent-mode.md and docs/packet-mode.md.
+
+dpi-proxy-ctl is a compatibility alias for this command.
+EOF
+}
+
+JSON_FLAG=()
+if [ "${1:-}" = "--json" ]; then
+	JSON_FLAG=(--json)
+	shift
+fi
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift || true
+
+packet_cmd() {
+	local sub="${1:-status}"
+	[ $# -gt 0 ] && shift || true
+	case "$sub" in
+	start | stop | restart | reload)
+		need_systemctl
+		systemctl "$sub" "$PACKET_SERVICE"
+		;;
+	status)
+		if have systemctl; then
+			systemctl status --no-pager "$PACKET_SERVICE" || true
+			echo
+		fi
+		bin="$(find_packet_binary)" || { err "dpi-proxy-packet not found"; exit 1; }
+		"$bin" "${JSON_FLAG[@]}" --status
+		;;
+	strategy)
+		[ $# -ge 1 ] || { err "packet strategy needs a domain"; exit 1; }
+		bin="$(find_packet_binary)" || { err "dpi-proxy-packet not found"; exit 1; }
+		exec "$bin" "${JSON_FLAG[@]}" --show-strategy "$1"
+		;;
+	logs)
+		exec journalctl -u "$PACKET_SERVICE" -n "${1:-100}" --no-pager
+		;;
+	*)
+		err "unknown packet command: $sub"
+		exit 1
+		;;
+	esac
+}
+
+case "$cmd" in
+status)
+	if [ "${1:-}" = "--verbose" ] || [ "${1:-}" = "-v" ]; then
+		status_verbose
+	else
+		status_short
+	fi
+	;;
+start | stop | restart | reload)
+	need_systemctl
+	systemctl "$cmd" "$TP_SERVICE"
+	;;
+logs)
+	have journalctl || { err "journalctl not found"; exit 1; }
+	exec journalctl -u "$TP_SERVICE" -n "${1:-100}" --no-pager
+	;;
+strategy)
+	[ $# -ge 1 ] || { err "strategy needs a domain, e.g. dpictl strategy discord.com"; exit 1; }
+	tp_strategy "$1"
+	;;
+diagnose)
+	[ $# -ge 1 ] || { err "diagnose needs a domain"; exit 1; }
+	tp_diagnose "$1"
+	;;
+doctor)
+	doctor
+	;;
+support-bundle)
+	support_bundle "${1:-}"
+	;;
+version)
+	ver="$(version_string)"
+	echo "dpi-for-everyone ${ver:-(version unknown — dpi-proxy not found)}"
+	;;
+packet)
+	packet_cmd "$@"
+	;;
+probe)
+	[ $# -ge 1 ] || { err "probe needs a domain, e.g. dpictl probe example.com"; exit 1; }
+	run_probe --probe "$1"
+	;;
+reprobe)
+	[ $# -ge 1 ] || { err "reprobe needs a domain"; exit 1; }
+	run_probe --reprobe "$1"
+	;;
+networks)
+	bin="$(find_packet_binary)" || { err "dpi-proxy-packet not found"; exit 1; }
+	exec "$bin" "${JSON_FLAG[@]}" --status
+	;;
+-h | --help | help | "")
+	usage
+	;;
+*)
+	err "unknown command: $cmd (see --help)"
+	usage >&2
+	exit 1
+	;;
+esac

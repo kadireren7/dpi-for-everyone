@@ -23,6 +23,7 @@ PACKET_SERVICE="dpi-proxy-packet"
 TP_TABLE="dpi_proxy_tp"
 BIN_DEST="/usr/local/bin/dpi-proxy"
 PACKET_BIN_DEST="/usr/local/bin/dpi-proxy-packet"
+DPICTL_DEST="/usr/local/bin/dpictl"
 CTL_DEST="/usr/local/bin/dpi-proxy-ctl"
 UNIT_DIR="/etc/systemd/system"
 CONF_DIR="/etc/dpi-proxy"
@@ -147,6 +148,10 @@ fi
 
 log "[4/7] Installing binaries to /usr/local/bin..."
 install -m 0755 "$PROJECT_ROOT/dpi-proxy" "$BIN_DEST"
+# Strip the installed copy only — the source tree's own dpi-proxy
+# keeps its symbols for local debugging (make re rebuilds it anyway).
+command -v strip >/dev/null 2>&1 && strip "$BIN_DEST" 2>/dev/null || true
+install -m 0755 "$PROJECT_ROOT/scripts/dpictl" "$DPICTL_DEST"
 install -m 0755 "$PROJECT_ROOT/scripts/dpi-proxy-ctl" "$CTL_DEST"
 if [ "$WITH_PACKET" = 1 ]; then
 	install -m 0755 "$PROJECT_ROOT/dpi-proxy-packet" "$PACKET_BIN_DEST"
@@ -225,8 +230,10 @@ if [ "$OTHER_ACTIVE" = 1 ]; then
 	echo "  two will interfere."
 fi
 echo
-echo "  Status:     dpi-proxy-ctl status        (sudo for interception counters)"
-echo "  Logs:       dpi-proxy-ctl logs"
-echo "  Stop:       sudo dpi-proxy-ctl stop     (internet keeps working, unbypassed)"
+echo "  Status:     dpictl status               (sudo for interception counters)"
+echo "  Doctor:     dpictl doctor                (health checks)"
+echo "  Logs:       dpictl logs"
+echo "  Stop:       sudo dpictl stop             (internet keeps working, unbypassed)"
 echo "  Uninstall:  sudo ./scripts/uninstall.sh"
 echo "  Config:     $CONF_DEST (optional manual rules)"
+echo "  (dpi-proxy-ctl still works as an alias for dpictl)"
