@@ -24,22 +24,26 @@ man-in-the-middles TLS.
 
 **Linux:**
 
-```sh
-git clone https://github.com/kadireren7/dpi-for-everyone.git
-cd dpi-for-everyone
-sudo ./scripts/install.sh
-```
+1. Clone the repository.
+2. Run `sudo ./scripts/install.sh`.
 
-**Windows (Beta):** download `dpi-proxy-windows-x86_64.zip` from
-[Releases](https://github.com/kadireren7/dpi-for-everyone/releases),
-extract it, and double-click **`Install.cmd`** (accept the UAC
-prompt). Details: [docs/windows.md](docs/windows.md).
+Guide: [docs/linux.md](docs/linux.md).
 
-**macOS (Beta):** download the `dpi-proxy-macos-arm64.zip` (Apple
-silicon) or `-x86_64.zip` (Intel) package from
-[Releases](https://github.com/kadireren7/dpi-for-everyone/releases),
-extract it, and double-click **`Install.command`** (enter your
-password when asked). Details: [docs/macos.md](docs/macos.md).
+**Windows (Beta):**
+
+1. Download the Windows release ZIP.
+2. Extract it.
+3. Double-click `Install.cmd` (accept the UAC prompt).
+
+Guide: [docs/windows.md](docs/windows.md).
+
+**macOS (Beta):**
+
+1. Download the matching macOS release ZIP (Apple silicon or Intel).
+2. Extract it.
+3. Double-click `Install.command` (enter your password when asked).
+
+Guide: [docs/macos.md](docs/macos.md).
 
 Each installer builds/checks the service, verifies DNS and HTTPS
 through it, and enables it at boot — nothing to configure afterwards.
@@ -94,22 +98,17 @@ if they need it.
 
 ## Uninstall
 
-```sh
-sudo ./scripts/uninstall.sh             # Linux: removes service, binaries, nftables table
-sudo ./scripts/uninstall.sh --purge     # ...and /etc/dpi-proxy
-```
-
-Windows: double-click `Uninstall.cmd` (or `uninstall.ps1`, see
-[docs/windows.md](docs/windows.md)). macOS: double-click
-`Uninstall.command` (or `uninstall.sh`, see
-[docs/macos.md](docs/macos.md)).
+Linux: `sudo ./scripts/uninstall.sh` (details: [docs/linux.md](docs/linux.md)).
+Windows: double-click `Uninstall.cmd` (details: [docs/windows.md](docs/windows.md)).
+macOS: double-click `Uninstall.command` (details: [docs/macos.md](docs/macos.md)).
 
 ## Documentation
 
 - [docs/cli.md](docs/cli.md) — full `dpictl` command reference.
-- [docs/windows.md](docs/windows.md), [docs/macos.md](docs/macos.md) —
-  platform-specific install, commands, files, and how each one touches
-  the system (WinDivert / PF).
+- [docs/linux.md](docs/linux.md), [docs/windows.md](docs/windows.md),
+  [docs/macos.md](docs/macos.md) — platform-specific install, commands,
+  files, troubleshooting, and how each one touches the system
+  (nftables / WinDivert / PF).
 - [docs/transparent-mode.md](docs/transparent-mode.md) — how the
   engine works (all platforms): DNS, the decision ladder, fail-open,
   operation.
