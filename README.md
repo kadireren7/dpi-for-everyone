@@ -15,8 +15,8 @@ man-in-the-middles TLS.
 | Platform | What you get | Validation |
 |---|---|---|
 | Linux | **Transparent automatic mode** | Real ISP/DPI field-tested |
-| Windows 10/11 (x64) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real Windows GitHub runners with the real WinDivert driver, and real ISP/DPI field-tested on a physical Windows PC |
-| macOS (Apple silicon, Intel) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real macOS GitHub runners with real PF and launchd, and real ISP/DPI field-tested on a physical Mac |
+| Windows 10/11 (x64) | **Transparent automatic mode (Beta)** | Real ISP/DPI field-tested |
+| macOS (Apple silicon, Intel) | **Transparent automatic mode (Beta)** | Real ISP/DPI field-tested |
 
 `dpi-proxy --capabilities` prints what the binary you have supports.
 
