@@ -21,11 +21,6 @@ INCLUDES = -Iinclude
 
 LDFLAGS = -lpthread
 
-# Applied only to the actual shipped binaries (not test binaries,
-# which don't need it and where a stripped-down link would only make
-# a crash backtrace less useful during development).
-GC_LDFLAGS = -Wl,--gc-sections
-
 # e.g. `make test TEST_CFLAGS="-fsanitize=address,undefined -g"`
 TEST_CFLAGS ?=
 
@@ -116,12 +111,22 @@ OPENSSL_STATIC ?=
 
 UNAME_S := $(shell uname -s)
 
+# Dead-code elimination at link time (drops whole functions/data the
+# binary never calls — most useful against the statically-linked
+# OpenSSL on Darwin/Windows). GNU ld/lld (Linux, and Windows via
+# MinGW, always, regardless of host — see the `windows` target) spell
+# this --gc-sections; Apple's ld64 (Darwin) uses a different flag
+# entirely, -dead_strip, and rejects --gc-sections outright (confirmed
+# for real in CI: "ld: unknown options: --gc-sections"). Applied only
+# to the actual shipped binaries, not test binaries.
 ifeq ($(UNAME_S),Linux)
 PROXY_SRC = $(SRC) $(TP_SRC)
 LDFLAGS += $(OPENSSL_LIBS)
 INCLUDES += $(OPENSSL_CFLAGS)
 CFLAGS += -DHAVE_TRANSPARENT
+GC_LDFLAGS = -Wl,--gc-sections
 else ifeq ($(UNAME_S),Darwin)
+GC_LDFLAGS = -Wl,-dead_strip
 ifneq ($(OPENSSL_PREFIX),)
 PROXY_SRC = $(SRC) $(MAC_TP_SRC)
 INCLUDES += -I$(OPENSSL_PREFIX)/include
@@ -277,8 +282,13 @@ WIN_OBJ = $(SRC:.c=.win.o) $(WIN_TP_SRC:.c=.win.o)
 %.win.o: %.c
 	$(CC_WIN) $(WIN_CFLAGS) $(INCLUDES) -c $< -o $@
 
+# Always GNU ld via MinGW, regardless of the host building it (this
+# target isn't gated by UNAME_S at all) — --gc-sections is always the
+# right flag here, never the shared $(GC_LDFLAGS) (empty when built
+# from a host that matched neither the Linux nor Darwin branch above,
+# e.g. MSYS2's own uname -s).
 windows: $(WIN_OBJ)
-	$(CC_WIN) $(WIN_CFLAGS) $(WIN_OBJ) $(LDFLAGS_WIN) $(GC_LDFLAGS) -o $(NAME).exe
+	$(CC_WIN) $(WIN_CFLAGS) $(WIN_OBJ) $(LDFLAGS_WIN) -Wl,--gc-sections -o $(NAME).exe
 
 # Pure unit tests built for Windows (run them with wine, or on
 # Windows): the shared decision/DNS/TLS-parsing core.
