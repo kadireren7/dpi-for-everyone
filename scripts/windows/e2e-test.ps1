@@ -184,7 +184,7 @@ Write-Host ("startup time: {0:N2}s (restart issued -> engine: running)" -f ($t1 
 $proc = Get-Process -Name dpi-proxy
 Write-Host ("daemon: {0} thread(s), working set {1:N1} MB, CPU time {2}" -f $proc.Threads.Count, ($proc.WorkingSet64 / 1MB), $proc.TotalProcessorTime)
 foreach ($u in 'https://example.com/', 'https://www.wikipedia.org/', 'https://github.com/') {
-    1..3 | ForEach-Object -Parallel { & curl.exe -sS -o NUL --max-time 20 $using:u } -ThrottleLimit 9 -ErrorAction SilentlyContinue
+    1..3 | ForEach-Object -Parallel { & curl.exe -sS -o NUL --max-time 20 $using:u } -ThrottleLimit 9
 }
 $proc.Refresh()
 Write-Host ("daemon under load: working set {0:N1} MB, CPU time {1}" -f ($proc.WorkingSet64 / 1MB), $proc.TotalProcessorTime)
