@@ -4,7 +4,13 @@ CC = cc
 
 VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0-dev)
 
-CFLAGS = -Wall -Wextra -Werror -DDPI_PROXY_VERSION=\"$(VERSION)\"
+# -ffunction-sections/-fdata-sections: pure compile-time bookkeeping
+# (no behavior or debuggability change) that lets the linker discard
+# whole functions/data the final binary never calls, most usefully
+# from the statically-linked OpenSSL on Windows/macOS — see
+# GC_LDFLAGS below, applied only to the actual shipped binaries.
+CFLAGS = -Wall -Wextra -Werror -DDPI_PROXY_VERSION=\"$(VERSION)\" \
+	-ffunction-sections -fdata-sections
 
 # Header dependencies (.d files next to each .o): changing a header
 # rebuilds every object that includes it, so a struct change can
@@ -14,6 +20,11 @@ DEPFLAGS = -MMD -MP
 INCLUDES = -Iinclude
 
 LDFLAGS = -lpthread
+
+# Applied only to the actual shipped binaries (not test binaries,
+# which don't need it and where a stripped-down link would only make
+# a crash backtrace less useful during development).
+GC_LDFLAGS = -Wl,--gc-sections
 
 # e.g. `make test TEST_CFLAGS="-fsanitize=address,undefined -g"`
 TEST_CFLAGS ?=
@@ -133,7 +144,7 @@ OBJ = $(PROXY_SRC:.c=.o)
 all: $(NAME)
 
 $(NAME): $(OBJ)
-	$(CC) $(CFLAGS) $(OBJ) $(LDFLAGS) -o $(NAME)
+	$(CC) $(CFLAGS) $(OBJ) $(LDFLAGS) $(GC_LDFLAGS) -o $(NAME)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) $(TEST_CFLAGS) $(INCLUDES) -c $< -o $@
@@ -267,7 +278,7 @@ WIN_OBJ = $(SRC:.c=.win.o) $(WIN_TP_SRC:.c=.win.o)
 	$(CC_WIN) $(WIN_CFLAGS) $(INCLUDES) -c $< -o $@
 
 windows: $(WIN_OBJ)
-	$(CC_WIN) $(WIN_CFLAGS) $(WIN_OBJ) $(LDFLAGS_WIN) -o $(NAME).exe
+	$(CC_WIN) $(WIN_CFLAGS) $(WIN_OBJ) $(LDFLAGS_WIN) $(GC_LDFLAGS) -o $(NAME).exe
 
 # Pure unit tests built for Windows (run them with wine, or on
 # Windows): the shared decision/DNS/TLS-parsing core.

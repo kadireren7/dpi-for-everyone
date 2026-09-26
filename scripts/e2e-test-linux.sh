@@ -116,6 +116,32 @@ dpi-proxy-ctl status
 dpi-proxy-ctl diagnose example.com
 pass "alias still works"
 
+stepn "size and resource use"
+ls -l /usr/local/bin/dpi-proxy
+t0="$(date +%s.%N)"
+sudo systemctl restart dpi-proxy-transparent
+i=0
+while [ $i -lt 40 ]; do
+	grep -q '^engine: running' "$STATUS" 2>/dev/null && break
+	sleep 0.25
+	i=$((i + 1))
+done
+t1="$(date +%s.%N)"
+grep -q '^engine: running' "$STATUS" || die "did not report running after restart (resource-use step)"
+awk -v a="$t0" -v b="$t1" 'BEGIN { printf "startup time: %.2fs (start issued -> engine: running)\n", b - a }'
+pid="$(field pid)"
+ps -o pid=,nlwp=,rss=,vsz=,%cpu= -p "$pid" \
+	| awk '{ printf "daemon pid %s: %s thread(s), RSS %.1f MB, VSZ %.0f MB, CPU %s%%\n", $1, $2, $3/1024, $4/1024, $5 }'
+for u in https://example.com/ https://www.wikipedia.org/ https://github.com/; do
+	for _ in 1 2 3; do fetch "$u" >/dev/null & done
+done
+wait
+ps -o pid=,rss=,%cpu= -p "$pid" | awk '{ printf "daemon pid %s under load: RSS %.1f MB, CPU %s%%\n", $1, $2/1024, $3 }'
+curl -sS -o /dev/null --max-time 60 \
+	-w 'throughput: %{size_download} bytes in %{time_total}s (%{speed_download} B/s)\n' \
+	'https://speed.cloudflare.com/__down?bytes=50000000' || true
+pass "measured"
+
 stepn "uninstall cleans only our own state"
 sudo "$ROOT/scripts/uninstall.sh" --purge
 systemctl list-unit-files | grep -q dpi-proxy-transparent && die "unit still present"

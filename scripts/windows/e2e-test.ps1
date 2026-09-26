@@ -168,6 +168,29 @@ $out = (& $ctl diagnose example.com 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0 -or $out -notmatch 'https:\s+HTTP \d+') { Die 'dpi-proxy-ctl alias diagnose failed' }
 Pass 'dpi-proxy-ctl still works as an alias'
 
+Step 'size and resource use'
+$exe = Join-Path $InstDir 'dpi-proxy.exe'
+Get-Item $exe | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+$t0 = Get-Date
+Restart-Service dpi-proxy
+$ok = $false
+foreach ($i in 1..40) {
+    Start-Sleep -Milliseconds 250
+    if ((Select-String -Path $StatusFile -Pattern '^engine: running' -Quiet -ErrorAction SilentlyContinue)) { $ok = $true; break }
+}
+$t1 = Get-Date
+if (-not $ok) { Die 'did not report running after restart (resource-use step)' }
+Write-Host ("startup time: {0:N2}s (restart issued -> engine: running)" -f ($t1 - $t0).TotalSeconds)
+$proc = Get-Process -Name dpi-proxy
+Write-Host ("daemon: {0} thread(s), working set {1:N1} MB, CPU time {2}" -f $proc.Threads.Count, ($proc.WorkingSet64 / 1MB), $proc.TotalProcessorTime)
+foreach ($u in 'https://example.com/', 'https://www.wikipedia.org/', 'https://github.com/') {
+    1..3 | ForEach-Object -Parallel { & curl.exe -sS -o NUL --max-time 20 $using:u } -ThrottleLimit 9 -ErrorAction SilentlyContinue
+}
+$proc.Refresh()
+Write-Host ("daemon under load: working set {0:N1} MB, CPU time {1}" -f ($proc.WorkingSet64 / 1MB), $proc.TotalProcessorTime)
+& curl.exe -sS -o NUL --max-time 60 -w 'throughput: %{size_download} bytes in %{time_total}s (%{speed_download} B/s)\n' 'https://speed.cloudflare.com/__down?bytes=50000000'
+Pass 'measured'
+
 Step 'uninstall cleans only our own state'
 # as documented: the uninstall.ps1 from the extracted package folder
 & powershell -ExecutionPolicy Bypass -File (Join-Path $Package 'uninstall.ps1') -Purge

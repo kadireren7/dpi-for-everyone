@@ -148,6 +148,9 @@ fi
 
 log "[4/7] Installing binaries to /usr/local/bin..."
 install -m 0755 "$PROJECT_ROOT/dpi-proxy" "$BIN_DEST"
+# Strip the installed copy only — the source tree's own dpi-proxy
+# keeps its symbols for local debugging (make re rebuilds it anyway).
+command -v strip >/dev/null 2>&1 && strip "$BIN_DEST" 2>/dev/null || true
 install -m 0755 "$PROJECT_ROOT/scripts/dpictl" "$DPICTL_DEST"
 install -m 0755 "$PROJECT_ROOT/scripts/dpi-proxy-ctl" "$CTL_DEST"
 if [ "$WITH_PACKET" = 1 ]; then
