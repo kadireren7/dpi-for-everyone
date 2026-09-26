@@ -114,6 +114,8 @@ Windows: double-click `Uninstall.cmd` (or `uninstall.ps1`, see
   operation.
 - [docs/development.md](docs/development.md) — building, tests,
   sanitizers, CI.
+- [docs/performance.md](docs/performance.md) — package size breakdown
+  and measured resource use, per platform.
 - [docs/packet-mode.md](docs/packet-mode.md),
   [docs/architecture.md](docs/architecture.md),
   [docs/discovery.md](docs/discovery.md),
