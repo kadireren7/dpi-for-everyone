@@ -15,8 +15,8 @@ man-in-the-middles TLS.
 | Platform | What you get | Validation |
 |---|---|---|
 | Linux | **Transparent automatic mode** | Real ISP/DPI field-tested |
-| Windows 10/11 (x64) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real Windows GitHub runners with the real WinDivert driver; **real ISP/DPI field validation still pending** |
-| macOS (Apple silicon, Intel) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real macOS GitHub runners with real PF and launchd; **not yet tested on a physical Mac or against real ISP DPI** |
+| Windows 10/11 (x64) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real Windows GitHub runners with the real WinDivert driver, and real ISP/DPI field-tested on a physical Windows PC |
+| macOS (Apple silicon, Intel) | **Transparent automatic mode (Beta)** | Fully end-to-end tested on real macOS GitHub runners with real PF and launchd, and real ISP/DPI field-tested on a physical Mac |
 
 `dpi-proxy --capabilities` prints what the binary you have supports.
 
@@ -86,9 +86,10 @@ if they need it.
   tool (dpi-bypass, GoodbyeDPI, zapret, …) alongside it — `dpictl
   doctor` and the service itself warn if they detect one.
 - **Windows and macOS are Beta**: end-to-end tested in CI on real
-  runners, but not yet validated against real ISP DPI or on a wide
-  range of consumer hardware. Platform-specific details and
-  limitations: [docs/windows.md](docs/windows.md),
+  runners, and field-tested against real ISP-level DPI on one physical
+  Windows PC and one physical Mac respectively; not yet validated
+  across a wide range of consumer hardware and networks. Platform-
+  specific details and limitations: [docs/windows.md](docs/windows.md),
   [docs/macos.md](docs/macos.md).
 
 ## Uninstall

@@ -57,9 +57,12 @@ UNINSTALL
   remove /usr/local/etc/dpi-proxy.
 
 This is a beta: it passes a full automated end-to-end test on real
-macOS runners in CI (PF, launchd, root), but it has not yet been
-tested on a physical Mac or against real ISP DPI. It is not a VPN and
-never decrypts traffic. How it works: it adds its own rules to the
+macOS runners in CI (PF, launchd, root), and has been field-tested on
+a physical Mac against real ISP-level DPI (Turkey) - DPI-blocked sites
+opened normally with system-wide transparent mode, no manual proxy or
+DNS configuration. Not yet validated across a wide range of consumer
+Macs and networks. It is not a VPN and never decrypts traffic. How it
+works: it adds its own rules to the
 built-in macOS packet filter (PF) - in its own section, leaving
 everything else alone - so this Mac's HTTPS and DNS go through the
 local dpi-proxy service; when the service stops or crashes the rules

@@ -56,7 +56,10 @@ UNINSTALL
   Add -Purge to also delete settings and logs (%ProgramData%\dpi-proxy).
 
 This is a beta: it has been fully end-to-end tested on real Windows
-machines in CI (including the real WinDivert driver), but not yet
-validated against real ISP-level DPI or on a wide range of consumer
-machines. It is not a VPN and never decrypts traffic.
+machines in CI (including the real WinDivert driver), and field-tested
+on a physical Windows PC against real ISP-level DPI (Turkey) - DPI-
+blocked sites opened normally after a system-wide install, no manual
+proxy or DNS configuration. Not yet validated across a wide range of
+consumer machines and networks. It is not a VPN and never decrypts
+traffic.
 More: https://github.com/kadireren7/dpi-for-everyone

@@ -4,9 +4,12 @@ macOS transparent mode works the same way as on Linux: the built-in
 macOS packet filter (PF) sends this Mac's HTTPS and DNS to the local
 `dpi-proxy` service. It passes the full automated end-to-end test on
 real macOS GitHub runners (macOS 14, 15 and 26 on Apple silicon,
-macOS 15 on Intel; real PF and launchd, root), but it has **not yet
-been tested on a physical Mac or against real ISP DPI**. Field reports
-are welcome.
+macOS 15 on Intel; real PF and launchd, root), and has been field-
+tested on a physical Mac against real ISP-level DPI in Turkey:
+DPI-blocked sites (Discord and others) opened normally with system-
+wide transparent mode, with no manual proxy or DNS configuration. It
+has not yet been validated across a wide range of consumer hardware
+and networks. Field reports are welcome.
 
 ## Quick start
 
@@ -75,8 +78,10 @@ keeps working, just unbypassed. Details:
 
 ## Limitations specific to macOS
 
-- Not yet tested on a physical Mac or against real ISP DPI (CI
-  machines are virtual machines on Apple hardware).
+- Field-tested against real ISP DPI on one physical Mac (real home
+  network in Turkey); not yet validated across a wide range of
+  consumer hardware, networks or ISPs (CI machines remain virtual
+  machines on Apple hardware).
 - DNS servers with IPv6 link-local addresses (`fe80::…`) are not
   intercepted; if a network hands out only such a resolver, names are
   resolved by it unprotected.

@@ -4,8 +4,11 @@ Windows transparent mode works the same way as on Linux: [WinDivert](https://req
 redirects this machine's own outgoing HTTPS and DNS to the local
 `dpi-proxy` service. It passes the full automated end-to-end test on
 real Windows GitHub runners (the real WinDivert driver, Administrator),
-but it has **not yet been validated against real ISP DPI**. Field
-reports are welcome.
+and has been field-tested on a physical Windows PC against real
+ISP-level DPI in Turkey: DPI-blocked sites (Discord and others) opened
+normally after a system-wide install, with no manual proxy or DNS
+configuration. It has not yet been validated across a wide range of
+consumer hardware and networks. Field reports are welcome.
 
 ## Quick start
 
@@ -78,7 +81,9 @@ DPI tools use it.
 
 ## Limitations specific to Windows
 
-- Not yet validated against real ISP DPI.
+- Field-tested against real ISP DPI on one physical Windows PC (real
+  home network in Turkey); not yet validated across a wide range of
+  consumer hardware, networks or ISPs.
 - IPv6 interception and the QUIC fallback are implemented but not yet
   exercised by the automated test (the test machines have no IPv6).
 - All traffic to port 443 passes through the service in user space,
